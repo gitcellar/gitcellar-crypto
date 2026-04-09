@@ -1,0 +1,70 @@
+[package]
+name = "passkey-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["GitCellar, LLC"]
+description = "Cross-platform PassKey-native authentication library - Ed25519 identity management, challenge-response auth, and BIP39 recovery"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gitcellar/gitcellar-crypto"
+keywords = ["authentication", "passkey", "ed25519", "bip39", "identity"]
+categories = ["authentication", "cryptography"]
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["keyring", "jwt"]
+# OS keyring integration
+keyring = ["dep:keyring"]
+# JWT token support
+jwt = ["dep:jsonwebtoken"]
+# FFI exports
+ffi = []
+
+[dependencies]
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Cryptography utilities
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.21"
+
+# BIP39 recovery codes
+bip39 = "2.0"
+
+# Platform utilities
+dirs = "5.0"
+hostname = "0.3"
+
+# Optional: OS keyring
+keyring = { version = "3", optional = true }
+
+# Optional: JWT
+jsonwebtoken = { version = "9.3", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# FFI
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Sequoia OpenPGP - platform-specific backends
+[target.'cfg(windows)'.dependencies]
+sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-cng"] }
+
+[target.'cfg(not(windows))'.dependencies]
+sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-nettle"] }

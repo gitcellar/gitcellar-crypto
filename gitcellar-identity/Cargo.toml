@@ -1,0 +1,24 @@
+[package]
+name = "gitcellar-identity"
+version = "0.1.0"
+edition = "2021"
+authors = ["GitCellar, LLC"]
+description = "GitCellar-specific identity wrapper around passkey-core"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gitcellar/gitcellar-crypto"
+
+[features]
+default = ["keyring"]
+keyring = ["passkey-core/keyring"]
+
+[dependencies]
+# Core passkey library
+passkey-core = { path = "../passkey-core" }
+
+# Re-export common dependencies for convenience
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"

@@ -1,0 +1,85 @@
+[package]
+name = "vault-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["GitCellar, LLC"]
+description = "Cross-platform encrypted backup library - chunking, encryption, and S3-compatible cloud storage"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gitcellar/gitcellar-crypto"
+keywords = ["encryption", "backup", "s3", "gpg", "chunking"]
+categories = ["cryptography", "filesystem"]
+
+[lib]
+# Build as both a Rust library and a C-compatible shared library
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["gpg"]
+# GPG/OpenPGP encryption (default)
+gpg = []
+# AES-only encryption (no GPG dependency, simpler key management)
+aes-only = []
+# FFI exports for C/C#/other languages
+ffi = []
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "fs", "io-util"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Cryptography - hashing
+sha2 = "0.10"
+base64 = "0.21"
+hex = "0.4"
+
+# Cryptography - symmetric encryption (for AES-only mode and .gckey files)
+aes-gcm = "0.10"
+argon2 = "0.5"
+hkdf = "0.12"
+rand = "0.8"
+hmac = "0.12"
+
+# HTTP client (for S3/B2 storage)
+reqwest = { version = "0.11", features = ["json", "stream"] }
+url = "2.5"
+urlencoding = "2.1"
+
+# Lightweight regex for XML parsing
+regex-lite = "0.1"
+
+# Utilities
+async-trait = "0.1"
+dirs = "5.0"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# FFI support (for C bindings)
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
+tempfile = "3.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Platform-specific cryptography backends for Sequoia OpenPGP
+[target.'cfg(windows)'.dependencies]
+sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-cng"] }
+
+[target.'cfg(not(windows))'.dependencies]
+sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-nettle"] }
+
+[build-dependencies]
+cbindgen = "0.26"
+
+[package.metadata.docs.rs]
+all-features = true

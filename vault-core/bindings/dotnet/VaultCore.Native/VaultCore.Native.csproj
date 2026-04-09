@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Package metadata -->
+    <PackageId>VaultCore.Native</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>GitCellar Team</Authors>
+    <Company>GitCellar</Company>
+    <Description>Cross-platform encrypted backup library - .NET bindings for vault-core</Description>
+    <PackageTags>encryption;backup;s3;aes;chunking</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/gitcellar/vault-core</RepositoryUrl>
+
+    <!-- Native library handling -->
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <!-- Include native libraries in package -->
+  <ItemGroup>
+    <None Include="runtimes\win-x64\native\vault_core.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="Exists('runtimes\win-x64\native\vault_core.dll')" />
+    <None Include="runtimes\linux-x64\native\libvault_core.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="Exists('runtimes\linux-x64\native\libvault_core.so')" />
+    <None Include="runtimes\osx-x64\native\libvault_core.dylib" Pack="true" PackagePath="runtimes\osx-x64\native\" Condition="Exists('runtimes\osx-x64\native\libvault_core.dylib')" />
+    <None Include="runtimes\osx-arm64\native\libvault_core.dylib" Pack="true" PackagePath="runtimes\osx-arm64\native\" Condition="Exists('runtimes\osx-arm64\native\libvault_core.dylib')" />
+  </ItemGroup>
+
+</Project>
