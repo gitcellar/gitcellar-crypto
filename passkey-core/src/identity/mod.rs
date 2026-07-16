@@ -106,8 +106,27 @@ impl Identity {
 
         debug!("Loading identity from: {:?}", secret_path);
 
-        let cert_data = std::fs::read(&secret_path)
+        let raw = std::fs::read(&secret_path)
             .map_err(|e| PasskeyError::KeyLoad(format!("Failed to read {}: {}", secret_path.display(), e)))?;
+
+        // F5 (DEC-LD-03): open the at-rest seal. A legacy (pre-F5) plaintext
+        // secret.pgp lacks the wrap magic and passes through unchanged, so
+        // existing identities keep loading and are re-sealed on the next save.
+        let cert_data: Vec<u8> = {
+            #[cfg(feature = "keyring")]
+            {
+                if crate::keywrap::is_wrapped(&raw) {
+                    crate::keywrap::unwrap_at_rest(&raw)
+                        .map_err(|e| PasskeyError::KeyLoad(format!("Failed to open sealed secret key: {}", e)))?
+                } else {
+                    raw
+                }
+            }
+            #[cfg(not(feature = "keyring"))]
+            {
+                raw
+            }
+        };
 
         let cert = openpgp::Cert::from_bytes(&cert_data)
             .map_err(|e| PasskeyError::KeyLoad(format!("Failed to parse certificate: {}", e)))?;
@@ -152,15 +171,46 @@ impl Identity {
         let secret_path = path.join(SECRET_KEY_FILE);
         let public_path = path.join(PUBLIC_KEY_FILE);
 
-        // Save secret key (full certificate with secret material)
-        debug!("Saving secret key to: {:?}", secret_path);
-        let mut secret_file = std::fs::File::create(&secret_path)
-            .map_err(|e| PasskeyError::KeySave(format!("Failed to create {}: {}", secret_path.display(), e)))?;
-
-        self.cert.as_tsk().serialize(&mut secret_file)
+        // Serialize the full TSK (secret material) to a buffer so it can be
+        // sealed at rest (F5 / AC-F5.4) before touching disk.
+        let mut tsk_bytes: Vec<u8> = Vec::new();
+        self.cert.as_tsk().serialize(&mut tsk_bytes)
             .map_err(|e| PasskeyError::KeySave(format!("Failed to write secret key: {}", e)))?;
 
-        // Set restrictive permissions on secret key (Unix only)
+        // F5 (AC-F5.4, DEC-LD-03): seal the secret key with the OS-keyring/DPAPI
+        // -backed Local Protection Key. The on-disk bytes become AES-256-GCM
+        // ciphertext, so an infostealer reading the file gets nothing usable —
+        // protection no longer relies on the inherited ACL alone. If the OS
+        // keyring is unavailable (rare; headless/CI without Secret-Service), fall
+        // back to a plaintext write + warning to preserve availability.
+        let secret_to_write: Vec<u8> = {
+            #[cfg(feature = "keyring")]
+            {
+                match crate::keywrap::wrap_at_rest(&tsk_bytes) {
+                    Ok(sealed) => sealed,
+                    Err(e) => {
+                        tracing::warn!(
+                            "At-rest wrap unavailable for secret key ({}); writing unsealed. \
+                             Key material protected by filesystem permissions only.",
+                            e
+                        );
+                        tsk_bytes
+                    }
+                }
+            }
+            #[cfg(not(feature = "keyring"))]
+            {
+                tsk_bytes
+            }
+        };
+
+        debug!("Saving secret key to: {:?}", secret_path);
+        std::fs::write(&secret_path, &secret_to_write)
+            .map_err(|e| PasskeyError::KeySave(format!("Failed to create {}: {}", secret_path.display(), e)))?;
+
+        // Set restrictive permissions on secret key (Unix only). Best-effort
+        // defence-in-depth; the at-rest seal above is the primary protection
+        // and closes the Windows inherited-ACL gap (AC-F5.4).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

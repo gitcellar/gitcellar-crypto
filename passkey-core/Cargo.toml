@@ -39,6 +39,11 @@ hex = "0.4"
 rand = "0.8"
 base64 = "0.21"
 
+# At-rest key wrap: AES-256-GCM seal for key material at rest (src/keywrap.rs).
+# Not the chunk path.
+aes-gcm = "0.10"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+
 # BIP39 recovery codes
 bip39 = "2.0"
 
@@ -46,8 +51,12 @@ bip39 = "2.0"
 dirs = "5.0"
 hostname = "0.3"
 
-# Optional: OS keyring
-keyring = { version = "3", optional = true }
+# Optional: OS keyring. The platform-backend features are REQUIRED: keyring v3
+# falls back to an in-memory mock store when no backend is enabled, which would
+# make at-rest seal/unseal (src/keywrap.rs) silently non-persistent across
+# processes. This crate owns that sealing, so it enables its own backend rather
+# than depending on a downstream crate to turn one on via feature unification.
+keyring = { version = "3", optional = true, features = ["windows-native", "apple-native", "linux-native"] }
 
 # Optional: JWT
 jsonwebtoken = { version = "9.3", optional = true }

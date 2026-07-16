@@ -46,7 +46,6 @@ pub fn verify_detached_signature_with_cert(
     // Create verification helper
     struct Helper {
         cert: Cert,
-        valid: bool,
     }
 
     impl VerificationHelper for Helper {
@@ -60,29 +59,32 @@ pub fn verify_detached_signature_with_cert(
         fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
             use openpgp::parse::stream::MessageLayer;
 
+            // CRITICAL (DISC-BC-09): Sequoia accepts the message iff `check`
+            // returns Ok, and `verify_bytes` reflects exactly that. So we MUST
+            // return Err when NO signature cryptographically verifies over the
+            // data — otherwise verification succeeds even for tampered data or a
+            // signature that signs *different* bytes (the auth-bypass class).
+            // Returning Ok only when a signature actually verified is the whole
+            // security property. (A prior version set a `self.valid` flag here
+            // and returned Ok(()) unconditionally; that flag was never read, so
+            // every structurally-valid signature was accepted regardless of the
+            // data — fixed to match `gitcellar_crypto::broadcast::verify_detached`.)
             for layer in structure {
-                match layer {
-                    MessageLayer::SignatureGroup { results } => {
-                        for result in results {
-                            if result.is_ok() {
-                                self.valid = true;
-                                return Ok(());
-                            }
+                if let MessageLayer::SignatureGroup { results } = layer {
+                    for result in results {
+                        if result.is_ok() {
+                            return Ok(()); // a good signature over this data
                         }
                     }
-                    _ => {}
                 }
             }
 
-            // No valid signature found
-            self.valid = false;
-            Ok(())
+            Err(anyhow::anyhow!("no valid signature over the provided data"))
         }
     }
 
     let helper = Helper {
         cert: cert.clone(),
-        valid: false,
     };
 
     // Build verifier and verify data
@@ -175,5 +177,83 @@ mod tests {
             Ok(valid) => assert!(!valid),
             Err(_) => {} // Also acceptable
         }
+    }
+
+    /// DISC-BC-09 regression guard. A genuine detached signature must verify
+    /// ONLY over the exact bytes it signed: tampered data — or a signature that
+    /// signs *different* bytes — must be rejected, and a signature must not
+    /// verify under a different identity's public key. The pre-fix verifier
+    /// accepted any structurally-valid signature over arbitrary data (an
+    /// authentication-bypass class on the challenge-response path).
+    #[test]
+    fn real_signature_verifies_only_over_exact_bytes() {
+        use sequoia_openpgp as openpgp;
+        use openpgp::policy::StandardPolicy;
+        use openpgp::serialize::stream::{Message, Signer};
+        use std::io::Write;
+
+        // Produce a genuine detached signature using the identity's signing key.
+        // passkey-core has no public signing API, so we sign with Sequoia directly
+        // via the secret-bearing cert exposed by `Identity::cert()` (mirrors the
+        // proven `gitcellar_crypto::EncryptionEngine::sign_data` idiom).
+        fn sign_detached(identity: &Identity, data: &[u8]) -> Vec<u8> {
+            let policy = StandardPolicy::new();
+            let keypair = identity
+                .cert()
+                .keys()
+                .with_policy(&policy, None)
+                .supported()
+                .for_signing()
+                .secret()
+                .next()
+                .expect("identity has a signing key")
+                .key()
+                .clone()
+                .into_keypair()
+                .expect("convert signing key into keypair");
+
+            let mut sig = Vec::new();
+            {
+                let message = Message::new(&mut sig);
+                let mut signer = Signer::new(message, keypair)
+                    .detached()
+                    .build()
+                    .expect("build detached signer");
+                signer.write_all(data).expect("write data to signer");
+                signer.finalize().expect("finalize signature");
+            }
+            sig
+        }
+
+        let identity = Identity::generate("tamper-test@example.com").unwrap();
+        let public_key = identity.export_public_key().unwrap();
+
+        let data = b"challenge-nonce-abc123";
+        let signature = sign_detached(&identity, data);
+
+        // Valid: the signature verifies over the exact bytes it signed.
+        assert!(
+            verify_detached_signature(&public_key, data, &signature).unwrap(),
+            "a genuine signature must verify over the exact signed bytes"
+        );
+
+        // Tampered data: a single-byte change must NOT verify. This is the exact
+        // case the pre-fix verifier wrongly accepted (returned Ok(true)).
+        let tampered = b"challenge-nonce-abc124";
+        assert_ne!(&data[..], &tampered[..]);
+        assert!(
+            !verify_detached_signature(&public_key, tampered, &signature).unwrap(),
+            "a signature over different data must be rejected (DISC-BC-09 guard)"
+        );
+
+        // Cross-key: a different identity's public key must not accept this
+        // signature (rejected via Ok(false) — or an Err; never Ok(true)).
+        let other = Identity::generate("other@example.com").unwrap();
+        let other_public = other.export_public_key().unwrap();
+        let cross = verify_detached_signature(&other_public, data, &signature);
+        assert!(
+            !matches!(cross, Ok(true)),
+            "a signature must not verify under a different identity's public key"
+        );
     }
 }

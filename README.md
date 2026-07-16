@@ -1,8 +1,8 @@
 # gitcellar-crypto
 
-The open-source cryptographic foundation of [GitCellar](https://gitcellar.com) — zero-knowledge encrypted Git hosting.
+The open-source cryptographic foundation of [GitCellar](https://gitcellar.com) — zero-access encrypted Git hosting.
 
-This repository contains the complete encryption pipeline: key generation, identity management, content chunking, and encryption/decryption. We publish this so that security researchers and users can audit exactly how GitCellar protects your code.
+This repository contains the encryption pipeline's core crates: key generation, identity management, content chunking, and encryption/decryption. We publish this so that security researchers and users can audit exactly how GitCellar protects your code.
 
 ## Architecture
 
@@ -16,10 +16,10 @@ gitcellar-identity             GitCellar-specific identity configuration
 gitcellar-crypto -----> vault-core
     |                      |
     |                      Content-defined chunking (CDC)
-    |                      AES-256-GCM & OpenPGP encryption
+    |                      XChaCha20-Poly1305 chunk AEAD (F2)
     |                      S3-compatible cloud storage
     |
-    Encryption engine, .gckey transfer,
+    Identity keys, .gckey transfer,
     cloud backup with recovery codes
 ```
 
@@ -29,8 +29,8 @@ gitcellar-crypto -----> vault-core
 |-------|-------------|
 | **[passkey-core](passkey-core/)** | Cross-platform passwordless identity library. Ed25519/X25519 key generation via Sequoia OpenPGP, BIP39 24-word recovery phrases, challenge-response authentication, multi-user state machine, OS credential storage. |
 | **[gitcellar-identity](gitcellar-identity/)** | Thin wrapper that applies GitCellar defaults (app name, path conventions) to passkey-core. |
-| **[gitcellar-crypto](gitcellar-crypto/)** | High-level encryption API. Encrypts/decrypts data and chunks using Sequoia OpenPGP, handles `.gckey` identity transfer files, and provides cloud backup bundles encrypted with recovery codes. |
-| **[vault-core](vault-core/)** | Content-defined chunking (CDC) for deduplication, encryption engines (AES-256-GCM and OpenPGP), and S3-compatible cloud storage abstraction (Backblaze B2, Wasabi, AWS S3, MinIO). |
+| **[gitcellar-crypto](gitcellar-crypto/)** | High-level encryption API. Holds the OpenPGP identity and key-grant paths, delegates chunk sealing to vault-core's XChaCha20-Poly1305 engine, handles `.gckey` identity transfer files, and provides cloud backup bundles encrypted with recovery codes. |
+| **[vault-core](vault-core/)** | Content-defined chunking (CDC) for deduplication, chunk encryption (XChaCha20-Poly1305 AEAD under a per-repo HKDF-SHA256-derived content key), and S3-compatible cloud storage abstraction (Backblaze B2, Wasabi, AWS S3, MinIO). Also hosts `AesEncryptionEngine` (AES-256-GCM), the passphrase-derived engine used by FFI consumers — that is not the chunk path. |
 
 ## Algorithms
 
@@ -38,10 +38,13 @@ gitcellar-crypto -----> vault-core
 |---------|-----------|----------------|
 | Signing key | Ed25519 | Sequoia OpenPGP |
 | Encryption key | X25519 (ECDH) | Sequoia OpenPGP |
-| Symmetric encryption | AES-256-GCM | `aes-gcm` crate (via OpenPGP for data, direct for backup bundles) |
-| Key derivation | Argon2id | `argon2` crate (for password-based encryption contexts) |
+| Chunk encryption (your repository's file contents) | XChaCha20-Poly1305 AEAD | `chacha20poly1305` crate — vault-core's `XChaChaChunkEngine`; 24-byte nonce, 16-byte Poly1305 tag |
+| Backup bundles, identity bundles, keys at rest | AES-256-GCM | `aes-gcm` crate, HKDF-SHA256-derived keys — this is not the chunk path |
+| Content-key derivation | HKDF-SHA256 | `hkdf` crate — per-repo content key, domain-separated `info` string |
+| Passphrase key derivation | Argon2id | `argon2` crate (passphrase-derived contexts) |
 | Recovery phrases | BIP39 | `bip39` crate (24-word mnemonic, derives encryption keys) |
-| Content chunking | CDC (polynomial rolling hash) | Custom implementation in vault-core |
+| Content chunking | Gear-based FastCDC, per-repo keyed Gear table | vault-core (table derived via keyed BLAKE3) |
+| Chunk naming | HMAC-SHA256 (keyed) / SHA-256 (unkeyed) | `hmac` / `sha2` crates |
 | Hashing | SHA-256 | `sha2` crate |
 
 ## How GitCellar Uses This
@@ -49,12 +52,14 @@ gitcellar-crypto -----> vault-core
 When a user pushes code to their local GitCellar Forge:
 
 1. **Webhook fires** to the GitCellar Service
-2. **vault-core** splits the git bundle into ~1 MB chunks using content-defined chunking
-3. **gitcellar-crypto** encrypts each chunk with the repository's OpenPGP key
-4. Encrypted chunks upload to Backblaze B2
+2. **vault-core** splits the git bundle into variable-size chunks (~1 MB average) using content-defined chunking, with per-repo keyed boundaries
+3. **vault-core** seals each chunk with XChaCha20-Poly1305 under a per-repo content key derived via HKDF-SHA256. The chunk's identity — repository, chunk name, offset, size — is bound into the AEAD as associated data, so a stored chunk only opens under the identity it was sealed with
+4. Encrypted chunks are concatenated into larger **pack** blobs, so a stored object's size does not map to a single chunk, and the packs upload to S3-compatible object storage
 5. A stream manifest (chunk index) is encrypted and uploaded alongside
 
-The user's private key never leaves their machine. The cloud storage provider sees only encrypted blobs. This is zero-knowledge encryption — GitCellar cannot decrypt your code.
+The user's private key never leaves their machine, and the storage provider sees only encrypted blobs. This is zero-access encryption — GitCellar cannot decrypt your code.
+
+**What this covers:** your code — the file contents of your repositories. Repository *metadata* that you choose to publish to your Cloud profile — repository names, languages, commit counts, branches — is held server-side in plaintext and is not protected by the encryption described above.
 
 ## Building
 
@@ -89,6 +94,10 @@ Sequoia OpenPGP uses platform-native cryptographic backends:
 | Windows | CNG | Built-in, no extra dependencies |
 | macOS | Nettle | Install via Homebrew |
 | Linux | Nettle | Install via package manager |
+
+## Scope of This Repository
+
+These crates are the core of GitCellar's encryption pipeline, not the whole of it. Some components — notably the parts of the key-management stack that are still being built — are not published here yet. What is here is what runs.
 
 ## License
 

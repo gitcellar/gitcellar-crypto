@@ -36,7 +36,24 @@ use crate::paths::PasskeyConfig;
 use serde::{Deserialize, Serialize};
 
 /// User info structure (matches user_info.json format)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `#[serde(default)]` is load-bearing for upgrade safety: a `user_info.json`
+/// written by an older build that lacks a field a newer build added still
+/// deserializes (missing fields default to empty) instead of failing the whole
+/// parse. `get_user_info` is already tolerant at the call site (`.ok()?`), but
+/// defaulting the struct means it returns `Some(partial)` rather than `None`
+/// for an old-format file — defense-in-depth alongside the desktop crate's
+/// `scan_valid_users` tolerant scan.
+///
+/// NOTE (duplication, do NOT consolidate): the desktop application crate
+/// carries a near-identical `UserInfo`. The two are hand-duplicated across the
+/// crate boundary; both carry `#[serde(default)]` independently. Consolidating
+/// them is deliberately out of scope: the shared-verifier lesson that motivated
+/// this comment concerned a cryptographic primitive, not a data DTO — a DTO
+/// duplicated in two places fails loudly and locally, a verifier duplicated in
+/// two places fails silently in one of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UserInfo {
     /// User's email address
     pub email: String,
