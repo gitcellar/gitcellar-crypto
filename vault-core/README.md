@@ -1,6 +1,6 @@
 # vault-core
 
-Cross-platform encrypted backup library providing content-defined chunking, AES/GPG encryption, and S3-compatible cloud storage.
+Cross-platform encrypted backup library providing content-defined chunking, XChaCha20-Poly1305 chunk encryption, and S3-compatible cloud storage.
 
 ## Overview
 
@@ -14,9 +14,9 @@ vault-core is a shared library designed to be used across multiple applications 
 
 ## Features
 
-- **Content-Defined Chunking**: Variable-size chunks for efficient deduplication
-- **AES-256-GCM Encryption**: Fast, authenticated symmetric encryption
-- **GPG/OpenPGP Encryption**: Full GPG key compatibility via Sequoia
+- **Content-Defined Chunking**: Variable-size chunks for efficient deduplication, with per-repo keyed boundaries
+- **XChaCha20-Poly1305 Chunk Encryption**: `XChaChaChunkEngine` — the single chunk-encryption engine. HKDF-SHA256 content-key derivation, 24-byte nonce, chunk identity bound as AEAD associated data
+- **AES-256-GCM Passphrase/FFI Helper**: `AesEncryptionEngine` — passphrase-derived encryption for `.gckey` and FFI consumers. **Not the chunk path**
 - **S3-Compatible Storage**: Works with B2, Wasabi, MinIO, AWS S3
 - **Cross-Platform**: Windows, Linux, macOS
 - **Multi-Language**: Rust native + C bindings + C# wrapper
@@ -28,7 +28,7 @@ vault-core is a shared library designed to be used across multiple applications 
 │                        vault-core                           │
 ├──────────────┬──────────────┬──────────────┬───────────────┤
 │   chunking   │  encryption  │   storage    │      ffi      │
-│     CDC      │  AES / GPG   │  File / S3   │  C bindings   │
+│     CDC      │ XChaCha/AES  │  File / S3   │  C bindings   │
 └──────────────┴──────────────┴──────────────┴───────────────┘
          │                           │                │
     Rust crate                  HTTP client     C# P/Invoke
@@ -44,20 +44,20 @@ vault-core is a shared library designed to be used across multiple applications 
 ### Rust
 
 ```rust
-use vault_core::{ChunkEngine, ChunkConfig, AesEncryptionEngine, EncryptionEngine};
+use vault_core::{ChunkEngine, ChunkConfig, XChaChaChunkEngine, EncryptionEngine};
 
 // 1. Create chunks
 let chunker = ChunkEngine::new(ChunkConfig::default());
 let data = std::fs::read("large_file.bin")?;
 let chunks = chunker.chunk_data(&data)?;
 
-// 2. Encrypt each chunk
-let key = AesEncryptionEngine::generate_key();
-let encryptor = AesEncryptionEngine::new(&key)?;
+// 2. Seal each chunk (XChaCha20-Poly1305; content key derived from the
+//    per-repo root key via HKDF-SHA256)
+let encryptor = XChaChaChunkEngine::new(&k_repo)?;   // k_repo: &[u8; 32]
 
 for chunk in &chunks {
-    let encrypted = encryptor.encrypt(&chunk.data)?;
-    // Store encrypted chunk...
+    let encrypted = encryptor.encrypt_chunk(chunk, &aad)?;
+    // Store encrypted chunk... wire format: [version(1)][nonce(24)][ciphertext][tag(16)]
 }
 
 // 3. Upload to cloud (example with FileStorage for testing)
@@ -67,6 +67,9 @@ storage.upload("chunks/abc123", &encrypted).await?;
 ```
 
 ### C# (.NET)
+
+The .NET bindings expose the AES passphrase helper (`AesEngine`) and the chunker.
+Chunk sealing for GitCellar repositories happens on the Rust side.
 
 ```csharp
 using VaultCore.Native;
@@ -101,10 +104,10 @@ foreach (var chunk in chunks)
 
 ```toml
 [dependencies]
-vault-core = { path = "../Shared/vault-core" }
+vault-core = { path = "../shared/vault-core" }
 
 # Or with specific features
-vault-core = { path = "../Shared/vault-core", default-features = false, features = ["aes-only"] }
+vault-core = { path = "../shared/vault-core", default-features = false, features = ["aes-only"] }
 ```
 
 ### C# (.NET)
@@ -112,7 +115,7 @@ vault-core = { path = "../Shared/vault-core", default-features = false, features
 ```xml
 <ItemGroup>
   <!-- Local development -->
-  <ProjectReference Include="..\..\Shared\vault-core\bindings\dotnet\VaultCore.Native\VaultCore.Native.csproj" />
+  <ProjectReference Include="..\..\shared\vault-core\bindings\dotnet\VaultCore.Native\VaultCore.Native.csproj" />
 
   <!-- Or as NuGet package (when published) -->
   <PackageReference Include="VaultCore.Native" Version="0.1.0" />
@@ -157,8 +160,8 @@ dotnet test ../VaultCore.Tests
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `gpg` | GPG/OpenPGP encryption via Sequoia | ✓ |
-| `aes-only` | AES-256-GCM only (no GPG dependency) | |
+| `gpg` | No-op, retained for backward-compatible feature selection. The OpenPGP-per-chunk engine was retired; vault-core contains no OpenPGP code | |
+| `aes-only` | Builds only the `AesEncryptionEngine` passphrase/FFI helper (AES-256-GCM; not the chunk path) | |
 | `ffi` | C-compatible FFI exports | |
 
 ### Feature Examples
@@ -167,7 +170,7 @@ dotnet test ../VaultCore.Tests
 # Full features (default)
 vault-core = { path = "..." }
 
-# AES-only (smaller binary, no GPG)
+# AES passphrase/FFI helper only
 vault-core = { path = "...", default-features = false, features = ["aes-only"] }
 
 # For building FFI library
@@ -200,22 +203,17 @@ assert!(chunker.verify_chunk(&chunk));
 ### Encryption
 
 ```rust
-// AES-256-GCM (recommended for new projects)
-let key = AesEncryptionEngine::generate_key();
-let engine = AesEncryptionEngine::new(&key)?;
-let encrypted = engine.encrypt(&plaintext)?;
-let decrypted = engine.decrypt(&encrypted)?;
+// Chunk sealing — XChaCha20-Poly1305 (the single chunk engine)
+use vault_core::encryption::XChaChaChunkEngine;
+let engine = XChaChaChunkEngine::new(&k_repo)?;         // k_repo: &[u8; 32]
+let sealed = engine.encrypt_chunk(&chunk, &aad)?;       // [version(1)][nonce(24)][ct][tag(16)]
+let opened = engine.decrypt_chunk(&sealed, &aad)?;      // fails closed on identity mismatch
 
-// Key derivation from passphrase
+// AES passphrase/FFI helper (AES-256-GCM; .gckey / FFI — NOT the chunk path)
+use vault_core::encryption::AesEncryptionEngine;
 let salt = AesEncryptionEngine::generate_salt();
 let key = AesEncryptionEngine::derive_key(passphrase, &salt)?;
-
-// GPG encryption (requires gpg feature)
-#[cfg(feature = "gpg")]
-{
-    let engine = GpgEncryptionEngine::new("user@example.com".to_string())?;
-    let encrypted = engine.encrypt(&plaintext)?;
-}
+let aes = AesEncryptionEngine::new(&key)?;
 ```
 
 ### Storage
@@ -249,7 +247,16 @@ storage.delete("path/to/file").await?;
 
 ## Wire Formats
 
-### AES Encrypted Data
+### Sealed Chunk (XChaCha20-Poly1305)
+
+```
+[version: 1 byte][nonce: 24 bytes][ciphertext][auth_tag: 16 bytes]
+```
+
+Overhead is a flat 41 bytes per chunk. The chunk's identity — repository, chunk
+name, size — is authenticated as associated data rather than stored in the blob.
+
+### AES Encrypted Data (passphrase/FFI helper)
 
 ```
 [nonce: 12 bytes][ciphertext][auth_tag: 16 bytes]
@@ -267,23 +274,25 @@ storage.delete("path/to/file").await?;
 
 ## Security
 
-- **AES-256-GCM**: Authenticated encryption with 256-bit keys
-- **Argon2id**: OWASP-recommended parameters for key derivation
-- **Random nonces**: Each encryption uses a fresh 96-bit nonce
-- **Content-based hashing**: SHA-256 for chunk identification
-- **No key storage**: Keys are provided by caller, never stored
+- **XChaCha20-Poly1305 for chunks**: authenticated encryption with a 256-bit content key and a 192-bit random nonce, so nonce collisions are a non-concern at any realistic chunk count
+- **Identity binding**: each chunk is sealed against its own associated data, so a spliced, substituted, or wrong-repository blob fails authentication instead of decrypting
+- **HKDF-SHA256**: per-repo content-key derivation with a domain-separated info string
+- **AES-256-GCM for the passphrase/FFI helper**: authenticated encryption with 256-bit keys and a fresh 96-bit nonce per payload
+- **Argon2id**: OWASP-recommended parameters for passphrase key derivation
+- **Content-based hashing**: keyed HMAC-SHA256 chunk names (SHA-256 when unkeyed)
+- **No key storage**: keys are provided by the caller, never stored
 
 ## Thread Safety
 
 All types are `Send + Sync` and can be safely used from multiple threads:
 
 ```rust
-let engine = Arc::new(AesEncryptionEngine::new(&key)?);
+let engine = Arc::new(XChaChaChunkEngine::new(&k_repo)?);
 
 // Safe to clone and use across threads
 let engine_clone = Arc::clone(&engine);
 tokio::spawn(async move {
-    let encrypted = engine_clone.encrypt(&data)?;
+    let sealed = engine_clone.encrypt_chunk(&chunk, &aad)?;
 });
 ```
 
@@ -292,8 +301,8 @@ tokio::spawn(async move {
 ```rust
 use vault_core::error::{VaultError, VaultResult};
 
-match engine.encrypt(&data) {
-    Ok(encrypted) => { /* success */ }
+match engine.encrypt_chunk(&chunk, &aad) {
+    Ok(sealed) => { /* success */ }
     Err(VaultError::Encryption(msg)) => { /* encryption failed */ }
     Err(VaultError::Key(msg)) => { /* key issue */ }
     Err(e) => { /* other error */ }
@@ -315,4 +324,4 @@ MIT License - see LICENSE file.
 
 - [GitCellar](https://github.com/gitcellar/gitcellar) - Encrypted Git hosting
 - [Foldergami](https://github.com/gitcellar/foldergami) - Windows virtual folders
-- [Sequoia-PGP](https://sequoia-pgp.org/) - OpenPGP implementation used for GPG support
+- [RustCrypto `chacha20poly1305`](https://github.com/RustCrypto/AEADs) - XChaCha20-Poly1305 implementation used for chunk sealing

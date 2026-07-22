@@ -1,14 +1,15 @@
 # gitcellar-crypto
 
-Encryption library for GitCellar - Sequoia-based encryption with identity from passkey-core.
+Encryption library for GitCellar — Sequoia-based OpenPGP identity, with chunk sealing delegated to `vault-core`.
 
 ## Purpose
 
-This crate provides encryption functionality for GitCellar:
+This crate provides:
 
-- **Encryption/decryption**: Encrypt and decrypt data using the identity
-- **Key transfer**: Export/import identities via .gckey files
-- **Cloud backup**: Encrypted identity backup with recovery codes
+- **Identity-bound encryption/decryption**: encrypt and decrypt data under the user's OpenPGP identity
+- **Chunk paths**: derives the per-repo content key and drives `vault-core`'s XChaCha20-Poly1305 chunk engine, binding each chunk's identity into the AEAD
+- **Key transfer**: export/import identities via `.gckey` files
+- **Cloud backup**: encrypted identity backup unlocked by a 24-word recovery code
 
 Identity management (generation, loading, multi-user support) is handled by `gitcellar-identity`, which wraps the reusable `passkey-core` library. This crate re-exports identity types for convenience.
 
@@ -21,7 +22,10 @@ passkey-core (reusable identity library)
 gitcellar-identity (GitCellar defaults: app_name="gitcellar", prefix="gcm")
     |
     v
-gitcellar-crypto (encryption + re-exports identity types)
+gitcellar-crypto (identity, key grants, cloud backup)
+    |
+    v
+vault-core (chunking + XChaCha20-Poly1305 chunk AEAD + storage)
 ```
 
 ## Key Storage
@@ -70,7 +74,13 @@ let decrypted = engine.decrypt_data(&encrypted)?;
 assert_eq!(decrypted, b"secret data");
 ```
 
-### Encrypt Chunks (for large files)
+### Encrypt Chunks (repository content)
+
+Chunks are sealed with **XChaCha20-Poly1305** under a per-repo content key derived
+with HKDF-SHA256 — not with the OpenPGP identity key, and not with AES-GCM. Each
+chunk's identity (repository, chunk name, size) is bound into the AEAD as
+associated data, so a stored chunk only opens under the identity it was sealed
+with; a spliced or wrong-repo chunk fails authentication rather than decrypting.
 
 ```rust
 use gitcellar_crypto::EncryptionEngine;
@@ -82,11 +92,11 @@ let chunk_engine = ChunkEngine::new(ChunkConfig::default());
 // Split large data into chunks
 let chunks = chunk_engine.chunk_data(&large_data)?;
 
-// Encrypt chunks in parallel
-let encrypted_chunks = engine.encrypt_chunks_parallel(&chunks).await?;
+// Seal chunks in parallel, each bound to its repository identity
+let encrypted_chunks = engine.encrypt_chunks_parallel(repo_id, &chunks).await?;
 
-// Decrypt chunks in parallel
-let decrypted_chunks = engine.decrypt_chunks_parallel(&encrypted_chunks).await?;
+// Open them again, authenticating against the same identities
+let decrypted_chunks = engine.decrypt_chunks_parallel(&encrypted_chunks, &aads).await?;
 ```
 
 ### Transfer Identity Between Machines (.gckey)
@@ -108,8 +118,6 @@ let gckey_data = std::fs::read_to_string("backup.gckey")?;
 let identity = IdentityBundle::import(&gckey_data)?;
 identity.save()?;
 ```
-
-See `docs/architecture/identity/GCKEY_AND_PASSKEY_ARCHITECTURE.md` for the full design.
 
 ## Public API
 
@@ -143,10 +151,13 @@ impl EncryptionEngine {
     fn export_public_key(&self) -> Result<String>;
     fn encrypt_data(&self, data: &[u8]) -> Result<Vec<u8>>;
     fn decrypt_data(&self, encrypted_data: &[u8]) -> Result<Vec<u8>>;
-    fn encrypt_chunk(&self, chunk: &Chunk) -> Result<Vec<u8>>;
-    fn decrypt_chunk(&self, encrypted_data: &[u8]) -> Result<Vec<u8>>;
-    async fn encrypt_chunks_parallel(&self, chunks: &[Chunk]) -> Result<Vec<Vec<u8>>>;
-    async fn decrypt_chunks_parallel(&self, encrypted_chunks: &[Vec<u8>]) -> Result<Vec<Vec<u8>>>;
+
+    // Chunk sealing: XChaCha20-Poly1305, identity bound as AEAD associated data
+    fn encrypt_chunk(&self, chunk: &Chunk, aad: &ChunkAad) -> Result<Vec<u8>>;
+    fn decrypt_chunk(&self, encrypted_data: &[u8], aad: &ChunkAad) -> Result<Vec<u8>>;
+    async fn encrypt_chunks_parallel(&self, repo_id: &str, chunks: &[Chunk]) -> Result<Vec<Vec<u8>>>;
+    async fn decrypt_chunks_parallel(&self, encrypted_chunks: &[Vec<u8>], aads: &[ChunkAad]) -> Result<Vec<Vec<u8>>>;
+
     fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>>;
 }
 ```
@@ -165,10 +176,13 @@ impl IdentityBundle {
 
 ## Algorithms
 
-- **Primary key**: Ed25519 (signing)
-- **Encryption subkey**: X25519 (ECDH key agreement)
-- **Symmetric encryption**: AES-256 (for data encryption)
-- **Cloud backup encryption**: AES-256-GCM with recovery-code-derived keys
+| Purpose | Algorithm |
+|---------|-----------|
+| Primary key (signing) | Ed25519 |
+| Encryption subkey | X25519 (ECDH key agreement) |
+| Chunk sealing — your repository's file contents | XChaCha20-Poly1305 AEAD, 24-byte nonce, per-repo content key derived via HKDF-SHA256, chunk identity bound as associated data. Implemented by `vault-core`'s `XChaChaChunkEngine`; this crate holds the identity and key-grant paths |
+| Cloud backup bundles, identity bundles, keys at rest | AES-256-GCM with HKDF-SHA256-derived keys (recovery-code-derived for cloud backup). **Not the chunk path** |
+| Recovery codes | BIP39 24-word mnemonic |
 
 ## Dependencies
 
@@ -181,13 +195,14 @@ This crate uses platform-specific cryptographic backends for Sequoia:
 
 - `passkey-core` - Reusable identity management library (Ed25519/X25519, BIP39 recovery)
 - `gitcellar-identity` - GitCellar-specific wrapper for passkey-core
-- `gitcellar-cli` - Uses this crate for CLI encryption operations
-- `gitcellar-service` - Uses this crate for service encryption operations
-- `vault-core` - Provides chunking for large files
+- `vault-core` - Content-defined chunking, XChaCha20-Poly1305 chunk AEAD, S3-compatible storage
 
 ## Cloud Backup (Recovery Codes)
 
-The crate also provides cloud backup functionality for identity recovery:
+The crate also provides cloud backup functionality for identity recovery. The
+backup bundle is encrypted with AES-256-GCM under a key derived from the user's
+24-word recovery code — this is the bundle path, distinct from the chunk path
+described above.
 
 ### RecoveryCode
 
@@ -222,10 +237,3 @@ let json = bundle.to_json()?;
 let bundle = CloudBackupBundle::from_json(&json)?;
 let recovered_identity = bundle.decrypt_with_recovery_code(&key_material)?;
 ```
-
-See `docs/architecture/encryption/DUAL_RECOVERY_MECHANISM.md` for full specification.
-
-## Design Documents
-
-- `docs/architecture/encryption/ENCRYPTION_SYSTEM_ARCHITECTURE.md` - Core encryption system architecture (encryption redesign, state machine, Sequoia rationale)
-- `docs/architecture/identity/GCKEY_AND_PASSKEY_ARCHITECTURE.md` - Passkey-first key management and gckey design rationale
