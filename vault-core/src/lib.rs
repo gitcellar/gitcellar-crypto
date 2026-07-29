@@ -3,7 +3,7 @@
 //! Cross-platform encrypted backup library providing:
 //!
 //! - **Content-defined chunking** for efficient deduplication
-//! - **GPG/AES encryption** for zero-knowledge security
+//! - **GPG/AES encryption** for zero-access security
 //! - **S3-compatible storage** backends (B2, Wasabi, MinIO, AWS S3)
 //!
 //! ## Overview

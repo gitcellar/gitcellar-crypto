@@ -7,13 +7,42 @@
 //!
 //! The bundle contains the identity encrypted with one or more mechanisms:
 //! - Recovery code: Uses a key derived from 24-word BIP39 mnemonic
-//! - Passkey (future): Uses a key derived from WebAuthn PRF extension
+//! - Passkey: Uses a key derived from WebAuthn PRF extension — **STRUCK, DO NOT WIRE UP.
+//!   See the warning below.**
 //!
 //! Each mechanism has its own encrypted copy of the identity, so either
 //! can decrypt independently. This provides redundancy without requiring
 //! both to be present.
 //!
-//! # Zero-Knowledge Property
+//! # ⛔ The passkey path is implemented but MUST NOT be wired up (2026-07-15)
+//!
+//! [`CloudBackupBundle::add_passkey_encryption`] and
+//! [`CloudBackupBundle::decrypt_with_passkey`] are complete, unit-tested, and
+//! exported — and **using them as a recovery mechanism would silently destroy user
+//! data.** They are retained only because the format is sound; the *mechanism that
+//! would feed them* is not. A feasibility spike (2026-07-15) struck this path:
+//!
+//! - **Windows Hello passkeys are TPM-bound and non-exportable** — the PRF secret dies
+//!   with the machine, i.e. it fails in exactly the scenario recovery exists for. No
+//!   synced, PRF-capable passkey path exists on Windows today (the OS plugin API plumbs
+//!   PRF; no provider has implemented it).
+//! - **Cross-device PRF stability is guaranteed by nobody.** Apple Developer Forums
+//!   #774111: the same iCloud-synced passkey and salt yielded *different* PRF outputs
+//!   across devices (fixed in iOS/macOS 18.4+). It failed **silently** — and a silently
+//!   wrong 32 bytes here does not error, it produces a bundle that can never be
+//!   decrypted. The user discovers this at the only moment it matters.
+//! - **No shipping E2EE product uses PRF as recovery.** 1Password ships PRF to others
+//!   and refused it for their own unlock. Bitwarden falls back to a master password;
+//!   Dashlane and Apple ADP fall back to a long recovery key.
+//!
+//! Recovery is the 24-word phrase (Path A) + enrolled-device cross-signing (ADR-019
+//! Path C). If PRF is ever unstruck, it may only be an *opportunistic convenience
+//! unlock layered over Path A* — never the root of the hierarchy, never a sole escrow.
+//!
+//! Full finding + revisit trigger: `docs/architecture/identity/MULTI_DEVICE_RECOVERY_SPEC.md`
+//! § "Recovery Surfaces" and ADR-012.
+//!
+//! # Zero-Access Property
 //!
 //! The bundle is encrypted client-side before upload. The server only ever
 //! sees ciphertext and cannot decrypt without the user's recovery code or
@@ -134,6 +163,19 @@ impl CloudBackupBundle {
 
     /// Add passkey encryption to an existing bundle
     ///
+    /// # ⛔ STRUCK — do not call from production code (2026-07-15)
+    ///
+    /// This works. That is the problem. There is no safe source for
+    /// `passkey_key_material` today: Windows Hello passkeys are TPM-bound (the secret
+    /// dies with the machine), and cross-device PRF stability is guaranteed by no
+    /// vendor — Apple shipped a bug where the same synced passkey returned *different*
+    /// PRF outputs per device, **silently**. Silently-wrong key material here does not
+    /// error; it writes a bundle that can never be decrypted, and the user finds out
+    /// during recovery. See the module-level warning for the full finding.
+    ///
+    /// Kept for format completeness and unit tests only. If PRF is ever unstruck, it
+    /// may only layer *over* the recovery phrase — never replace it.
+    ///
     /// # Arguments
     /// * `identity` - The identity (must match existing fingerprint)
     /// * `passkey_key_material` - 32-byte key from WebAuthn PRF
@@ -210,6 +252,13 @@ impl CloudBackupBundle {
     }
 
     /// Decrypt the bundle using a passkey
+    ///
+    /// # ⛔ STRUCK — do not call from production code (2026-07-15)
+    ///
+    /// Counterpart to [`Self::add_passkey_encryption`]; struck for the same reason. No
+    /// bundle written by this crate's supported paths carries a passkey payload, so in
+    /// practice this returns `Err` ("Bundle does not contain passkey encryption"). See
+    /// the module-level warning before wiring up anything that would change that.
     ///
     /// # Arguments
     /// * `passkey_key_material` - 32-byte key from WebAuthn PRF
@@ -290,8 +339,31 @@ fn deserialize_identity(data: &[u8]) -> Result<Identity> {
     Ok(Identity::from_armored_secret_key(&secret_key_str)?)
 }
 
-/// Encrypt data with a key material using HKDF + AES-256-GCM
+/// Encrypt data with a key material using HKDF + AES-256-GCM.
+///
+/// # Key-material (IKM) contract — IC-4 AC-IC4.3
+///
+/// `key_material` is the HKDF **input keying material (IKM)** and MUST be
+/// CSPRNG-derived high-entropy bytes — *never* a user-chosen passphrase.
+/// Today's two callers both honour this:
+/// - recovery-code path → BIP-39 mnemonic over 256 bits of `OsRng` entropy
+///   (`passkey_core::recovery::generate_recovery_code`);
+/// - passkey path (future) → 32-byte WebAuthn-PRF output.
+///
+/// HKDF is a key-derivation function, **not** a password-hashing function: it
+/// performs no work-factor stretching. Feeding it a low-entropy passphrase
+/// would silently make the cloud-backup bundle brute-forceable (a latent P0).
+/// A future passphrase-backed caller MUST route through a memory-hard KDF
+/// (Argon2id) first and pass the *stretched* output here — do not pass a
+/// passphrase directly. The `debug_assert` below is a development trip-wire,
+/// not a security boundary.
 fn encrypt_payload(data: &[u8], key_material: &[u8], context: &[u8]) -> Result<EncryptedPayload> {
+    debug_assert!(
+        key_material.len() >= 32,
+        "cloud-backup HKDF IKM must be CSPRNG-derived high-entropy material (>=32 bytes), \
+         never a user passphrase (IC-4 AC-IC4.3); got {} bytes",
+        key_material.len()
+    );
     let mut rng = rand::thread_rng();
 
     // Generate random salt and nonce

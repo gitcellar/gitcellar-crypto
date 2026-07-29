@@ -6,7 +6,7 @@ authors = ["GitCellar, LLC"]
 description = "Unified encryption library for GitCellar - Sequoia-based identity and encryption"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gitcellar/gitcellar-crypto"
-keywords = ["encryption", "git", "zero-knowledge", "openpgp", "sequoia"]
+keywords = ["encryption", "git", "zero-access", "openpgp", "sequoia"]
 categories = ["cryptography"]
 
 [dependencies]
