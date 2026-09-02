@@ -72,6 +72,10 @@ pub enum CryptoError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// Broadcast payload / manifest validation error (broadcast-system)
+    #[error("Broadcast error: {0}")]
+    Broadcast(String),
+
     /// Other errors
     #[error("{0}")]
     Other(#[from] anyhow::Error),

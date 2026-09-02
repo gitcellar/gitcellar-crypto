@@ -1,0 +1,21 @@
+{
+  "_doc": "Published deterministic test vector for the GitCellar chunk-format v1 (F2, XChaCha20-Poly1305) with the H-1 chunk-identity AAD binding. A third party reproduces `chunk_hex` bit-for-bit from (content_key_hex, nonce_hex, plaintext_utf8, aad) with any XChaCha20-Poly1305 implementation, and reproduces content_key_hex from (k_repo_hex, content_key_info) with any HKDF-SHA256. The AEAD associated data is `aad.cipher_aad_hex` = format_version_byte(1) || repo_id || 0x00 || chunk_name || 0x00 || stream_offset(u64 LE) || size(u64 LE); the AAD is NOT stored in the chunk — it only participates in the Poly1305 tag. Generated from source via `cargo test -p vault-core gen_published_test_vector -- --ignored --nocapture`; never hand-edited.",
+  "format_version": 1,
+  "cipher": "XChaCha20-Poly1305",
+  "kdf": "HKDF-SHA256",
+  "content_key_info": "gitcellar/chunk-content/v1",
+  "chunk_layout": "[version_byte(1)] [XNonce(24)] [ciphertext(n)] [Poly1305 tag(16)]",
+  "aad_layout": "version_byte(1) || repo_id || 0x00 || chunk_name || 0x00 || stream_offset(u64 LE) || size(u64 LE)  (associated data only; not stored)",
+  "k_repo_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "content_key_hex": "5b726c08c23f259b845f13e1b2068a9c94349f775862a6c48f9c81192581ca6a",
+  "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+  "plaintext_utf8": "GitCellar chunk-format v1 published test vector",
+  "aad": {
+    "repo_id": "alice/example-repo",
+    "chunk_name": "9f2c4e8a1b3d5f70e6c2a4881d3b5f7092e4c6a8b0d2f4e6182a3c4d5e6f7081",
+    "stream_offset": 0,
+    "size": 47,
+    "cipher_aad_hex": "01616c6963652f6578616d706c652d7265706f00396632633465386131623364356637306536633261343838316433623566373039326534633661386230643266346536313832613363346435653666373038310000000000000000002f00000000000000"
+  },
+  "chunk_hex": "01404142434445464748494a4b4c4d4e4f5051525354555657e7faadae7864e7667958dbf2880ea3e7e81543dff055d0a12f46dfc1cb245d220b9ab3011aa1789fb690c213a89f14e7b7f20a15b0ac26b9bbb65e68cd9349"
+}

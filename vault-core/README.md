@@ -4,13 +4,9 @@ Cross-platform encrypted backup library providing content-defined chunking, XCha
 
 ## Overview
 
-vault-core is a shared library designed to be used across multiple applications that need encrypted cloud backup functionality:
-
-| Project | Language | Use Case |
-|---------|----------|----------|
-| **GitCellar** | Rust | Encrypted Git repository hosting |
-| **Foldergami** | C# (.NET) | Vantage Drive encrypted backup |
-| **Vetiqbox** | C# (.NET) | Dropbox-like encrypted sync |
+vault-core is the chunking, chunk-sealing and storage layer of GitCellar. It is written as a
+reusable library for any application that needs encrypted, deduplicated cloud backup, and ships
+C bindings and a .NET wrapper for that reason.
 
 ## Features
 
@@ -34,8 +30,8 @@ vault-core is a shared library designed to be used across multiple applications 
     Rust crate                  HTTP client     C# P/Invoke
          │                           │                │
    ┌─────▼─────┐              ┌──────▼──────┐  ┌─────▼─────┐
-   │ GitCellar │              │  B2/Wasabi  │  │ Foldergami│
-   │  Service  │              │   MinIO/S3  │  │ Vetiqbox  │
+   │ GitCellar │              │  B2/Wasabi  │  │   .NET    │
+   │  Service  │              │   MinIO/S3  │  │ consumers │
    └───────────┘              └─────────────┘  └───────────┘
 ```
 
@@ -104,21 +100,17 @@ foreach (var chunk in chunks)
 
 ```toml
 [dependencies]
-vault-core = { path = "../shared/vault-core" }
+vault-core = { git = "https://github.com/gitcellar/gitcellar-crypto" }
 
 # Or with specific features
-vault-core = { path = "../shared/vault-core", default-features = false, features = ["aes-only"] }
+vault-core = { git = "https://github.com/gitcellar/gitcellar-crypto", default-features = false, features = ["aes-only"] }
 ```
 
 ### C# (.NET)
 
 ```xml
 <ItemGroup>
-  <!-- Local development -->
-  <ProjectReference Include="..\..\shared\vault-core\bindings\dotnet\VaultCore.Native\VaultCore.Native.csproj" />
-
-  <!-- Or as NuGet package (when published) -->
-  <PackageReference Include="VaultCore.Native" Version="0.1.0" />
+  <ProjectReference Include="path\to\vault-core\bindings\dotnet\VaultCore.Native\VaultCore.Native.csproj" />
 </ItemGroup>
 ```
 
@@ -135,8 +127,8 @@ cargo build --release
 # Run tests
 cargo test
 
-# Generate C header (requires --features ffi)
-cargo build --release --features ffi
+# Generate the C header: cbindgen expands macros, which needs a nightly toolchain
+cargo +nightly build --release --features ffi
 ```
 
 Output locations:
@@ -152,8 +144,6 @@ cd vault-core/bindings/dotnet/VaultCore.Native
 # Build
 dotnet build
 
-# Run tests
-dotnet test ../VaultCore.Tests
 ```
 
 ## Features
@@ -161,7 +151,7 @@ dotnet test ../VaultCore.Tests
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `gpg` | No-op, retained for backward-compatible feature selection. The OpenPGP-per-chunk engine was retired; vault-core contains no OpenPGP code | |
-| `aes-only` | Builds only the `AesEncryptionEngine` passphrase/FFI helper (AES-256-GCM; not the chunk path) | |
+| `aes-only` | No-op, retained for backward-compatible feature selection. `AesEncryptionEngine` (AES-256-GCM passphrase/FFI helper; not the chunk path) is always built | |
 | `ffi` | C-compatible FFI exports | |
 
 ### Feature Examples
@@ -169,9 +159,6 @@ dotnet test ../VaultCore.Tests
 ```toml
 # Full features (default)
 vault-core = { path = "..." }
-
-# AES passphrase/FFI helper only
-vault-core = { path = "...", default-features = false, features = ["aes-only"] }
 
 # For building FFI library
 vault-core = { path = "...", features = ["ffi"] }
@@ -311,17 +298,13 @@ match engine.encrypt_chunk(&chunk, &aad) {
 
 ## License
 
-MIT License - see LICENSE file.
+MIT OR Apache-2.0, at your option — see `LICENSE-MIT` and `LICENSE-APACHE` at the repository root.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Submit a pull request
+See [CONTRIBUTING.md](../CONTRIBUTING.md) at the repository root; security reports go through [SECURITY.md](../SECURITY.md).
 
 ## Related Projects
 
-- [GitCellar](https://github.com/gitcellar/gitcellar) - Encrypted Git hosting
-- [Foldergami](https://github.com/gitcellar/foldergami) - Windows virtual folders
+- [GitCellar](https://gitcellar.com) - Zero-access encrypted Git hosting, the primary consumer of this crate
 - [RustCrypto `chacha20poly1305`](https://github.com/RustCrypto/AEADs) - XChaCha20-Poly1305 implementation used for chunk sealing

@@ -34,6 +34,13 @@
 // Re-export everything from passkey-core
 pub use passkey_core::*;
 
+// Explicit module re-export so downstream crates can address the at-rest key
+// wrap by path (`gitcellar_identity::keywrap::...`). The glob above re-exports
+// passkey-core's public *items* but a bare `pub use ...::*` does not reliably
+// surface a child module as a name-addressable path for `::`-qualified use from
+// dependent crates (F5 / DEC-LD-03).
+pub use passkey_core::keywrap;
+
 /// Get the GitCellar-configured PasskeyConfig
 ///
 /// Returns a config with GitCellar-specific defaults:

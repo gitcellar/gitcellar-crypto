@@ -14,6 +14,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
+/// Default ceiling on a single downloaded object, in bytes (64 MiB).
+///
+/// Enormously generous for this workload: a pack targets
+/// [`crate::pack::DEFAULT_TARGET_PACK_SIZE`] (4 MiB), and the worst case — one
+/// chunk larger than the target getting its own pack — is 256 KiB + 41 B of AEAD
+/// overhead. The ceiling exists to bound a hostile provider, not to constrain
+/// legitimate objects; raise it with [`S3Config::with_max_object_bytes`] if a
+/// consumer of this library genuinely stores larger objects.
+pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn default_max_object_bytes() -> u64 {
+    DEFAULT_MAX_OBJECT_BYTES
+}
+
 /// S3 storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
@@ -34,6 +48,17 @@ pub struct S3Config {
 
     /// Optional path prefix within the bucket
     pub prefix: Option<String>,
+
+    /// Ceiling on the size of a single downloaded object, in bytes (F-2).
+    ///
+    /// The storage provider is the adversary in the zero-access model: it can
+    /// answer any GET with arbitrary bytes. `download` therefore refuses an
+    /// object larger than this — both by the declared `Content-Length` and, for
+    /// a response that declares nothing (or lies), by counting bytes as they
+    /// stream. Defaults to [`DEFAULT_MAX_OBJECT_BYTES`]; older serialized configs
+    /// that predate the field get the default.
+    #[serde(default = "default_max_object_bytes")]
+    pub max_object_bytes: u64,
 }
 
 impl S3Config {
@@ -52,6 +77,7 @@ impl S3Config {
             secret_access_key: app_key.to_string(),
             region: region.to_string(),
             prefix: None,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
         }
     }
 
@@ -70,6 +96,7 @@ impl S3Config {
             secret_access_key: secret_key.to_string(),
             region: region.to_string(),
             prefix: None,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
         }
     }
 
@@ -88,6 +115,7 @@ impl S3Config {
             secret_access_key: secret_key.to_string(),
             region: region.to_string(),
             prefix: None,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
         }
     }
 
@@ -106,12 +134,19 @@ impl S3Config {
             secret_access_key: secret_key.to_string(),
             region: "us-east-1".to_string(), // MinIO default
             prefix: None,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
         }
     }
 
     /// Set a path prefix for all objects
     pub fn with_prefix(mut self, prefix: &str) -> Self {
         self.prefix = Some(prefix.trim_matches('/').to_string());
+        self
+    }
+
+    /// Override the per-object download ceiling (see [`S3Config::max_object_bytes`]).
+    pub fn with_max_object_bytes(mut self, max_object_bytes: u64) -> Self {
+        self.max_object_bytes = max_object_bytes;
         self
     }
 }
@@ -285,7 +320,15 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // per-object ceiling in the SAME call — a hostile provider answers 500
+            // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
+            // is only ever logged or wrapped in an error.
+            let body = bounded_http::read_text_bounded(
+                response,
+                bounded_http::DEFAULT_MAX_DIAGNOSTIC_BYTES,
+            )
+            .await;
             return Err(VaultError::Storage(format!(
                 "Upload failed with status {}: {}",
                 status, body
@@ -323,16 +366,57 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // per-object ceiling in the SAME call — a hostile provider answers 500
+            // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
+            // is only ever logged or wrapped in an error.
+            let body = bounded_http::read_text_bounded(
+                response,
+                bounded_http::DEFAULT_MAX_DIAGNOSTIC_BYTES,
+            )
+            .await;
             return Err(VaultError::Storage(format!(
                 "Download failed with status {}: {}",
                 status, body
             )));
         }
 
-        let data = response.bytes().await.map_err(|e| {
-            VaultError::Network(format!("Failed to read response body: {}", e))
-        })?;
+        // F-2 (hardening review, Aug 2026): bound the body BEFORE buffering it.
+        //
+        // This used to be a bare `response.bytes().await` — no size check, no
+        // streaming, no ceiling. The provider is the adversary here and controls
+        // the response by construction, so it could answer an ordinary pack GET
+        // with a 50 GB body and the whole thing was allocated in-process before a
+        // single AEAD check ran. The AEAD would have rejected the bytes — but only
+        // after the allocation, so the tag never got the chance: repeated on every
+        // read it is a clean, purely-attacker-triggered denial of service against
+        // the Service that orchestrates decryption for the entire Desktop runtime.
+        //
+        // Two guards, because either alone is defeatable:
+        //   1. Refuse a declared `Content-Length` over the ceiling — cheap, and
+        //      costs the attacker the whole transfer.
+        //   2. Count bytes as they stream and abort past the ceiling — this is
+        //      what covers a response that declares nothing (chunked transfer
+        //      encoding) or declares a lie.
+        //
+        // M-9: both guards now live in `bounded_http::read_body_bounded`, shared
+        // with every other provider-facing backend, which is the point. The
+        // ceiling was first written here, on a backend with no production
+        // consumer, while the backends actually in production stayed
+        // unbounded. An inline copy per crate is how that happens; one
+        // implementation three call sites reach is how it stops.
+        let max = self.config.max_object_bytes;
+        let data = bounded_http::read_body_bounded(response, max)
+            .await
+            .map_err(|e| match e {
+                bounded_http::BoundedReadError::Io(err) => {
+                    VaultError::Network(format!("Failed to read response body: {}", err))
+                }
+                over => VaultError::Storage(format!(
+                    "refusing s3://{}/{}: {}",
+                    self.config.bucket, key, over
+                )),
+            })?;
 
         debug!(
             "Downloaded {} bytes from s3://{}/{}",
@@ -341,7 +425,7 @@ impl StorageBackend for S3Storage {
             key
         );
 
-        Ok(data.to_vec())
+        Ok(data)
     }
 
     async fn exists(&self, path: &str) -> VaultResult<bool> {
@@ -388,16 +472,30 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // per-object ceiling in the SAME call — a hostile provider answers 500
+            // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
+            // is only ever logged or wrapped in an error.
+            let body = bounded_http::read_text_bounded(
+                response,
+                bounded_http::DEFAULT_MAX_DIAGNOSTIC_BYTES,
+            )
+            .await;
             return Err(VaultError::Storage(format!(
                 "List failed with status {}: {}",
                 status, body
             )));
         }
 
-        let body = response.text().await.map_err(|e| {
-            VaultError::Network(format!("Failed to read list response: {}", e))
-        })?;
+        // M-9: the list response is a success-path read and was also unbounded.
+        // A hostile provider can answer a LIST with an arbitrarily large XML
+        // document, and the regex scan below runs over whatever we buffered. Same
+        // per-object ceiling as a download — a listing is not more trustworthy
+        // than an object.
+        let body = bounded_http::read_body_bounded(response, self.config.max_object_bytes)
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|e| VaultError::Network(format!("Failed to read list response: {}", e)))?;
 
         // Parse XML response (simplified - just extract Key elements)
         let mut keys = Vec::new();
@@ -439,7 +537,15 @@ impl StorageBackend for S3Storage {
         // S3 returns 204 for successful delete, but also doesn't error on non-existent
         if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // per-object ceiling in the SAME call — a hostile provider answers 500
+            // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
+            // is only ever logged or wrapped in an error.
+            let body = bounded_http::read_text_bounded(
+                response,
+                bounded_http::DEFAULT_MAX_DIAGNOSTIC_BYTES,
+            )
+            .await;
             return Err(VaultError::Storage(format!(
                 "Delete failed with status {}: {}",
                 status, body
@@ -517,5 +623,137 @@ mod tests {
     fn test_payload_hash() {
         let hash = S3Storage::payload_hash(b"test data");
         assert_eq!(hash.len(), 64); // SHA256 hex is 64 chars
+    }
+
+    // ====================================================================
+    // F-2 (hardening review, Aug 2026) — a malicious provider must not be able
+    // to OOM the client with an oversized response body.
+    //
+    // These drive a real `S3Storage` against a throwaway loopback server
+    // that plays the hostile provider. Nothing is mocked: the client signs,
+    // sends, and reads exactly as it does against B2.
+    // ====================================================================
+
+    /// Serve exactly one HTTP/1.1 response, then close. `head` is the status
+    /// line + headers (terminated by the caller), `body` the raw bytes that
+    /// follow. Returns the endpoint URL to point an `S3Config` at.
+    async fn spawn_hostile_provider(head: String, body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Drain the request line/headers; we answer the same way regardless.
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                // Every write below may fail once the client hangs up on us —
+                // that IS the behaviour under test, so errors are ignored.
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn storage_with_ceiling(endpoint: &str, max_object_bytes: u64) -> S3Storage {
+        let config = S3Config::minio(endpoint, "key", "secret", "bucket")
+            .with_max_object_bytes(max_object_bytes);
+        S3Storage::new(config).unwrap()
+    }
+
+    /// The provider declares a body far over the ceiling. Refused on the header
+    /// alone — the body is never buffered.
+    #[tokio::test]
+    async fn oversized_declared_content_length_is_refused() {
+        let endpoint = spawn_hostile_provider(
+            "HTTP/1.1 200 OK\r\nContent-Length: 5242880\r\n\r\n".to_string(),
+            vec![0u8; 4096], // never fully read
+        )
+        .await;
+
+        let storage = storage_with_ceiling(&endpoint, 1024);
+        let err = storage
+            .download("repos/opaque/packs/deadbeef")
+            .await
+            .expect_err("F-2: a 5 MiB declared body under a 1 KiB ceiling must be refused");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("5242880") && msg.contains("ceiling"),
+            "the refusal must name the declared size and the ceiling: {msg}"
+        );
+    }
+
+    /// The provider declares NOTHING (chunked transfer encoding) and streams past
+    /// the ceiling. This is the case a `Content-Length` check alone cannot catch,
+    /// and the reason the byte counter exists: the download aborts mid-stream
+    /// instead of buffering whatever the provider feels like sending.
+    #[tokio::test]
+    async fn undeclared_oversized_body_is_aborted_mid_stream() {
+        // 8 chunks × 64 KiB = 512 KiB, streamed with no Content-Length.
+        let mut body = Vec::new();
+        let chunk = vec![b'A'; 64 * 1024];
+        for _ in 0..8 {
+            body.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            body.extend_from_slice(&chunk);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+
+        let endpoint = spawn_hostile_provider(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_string(),
+            body,
+        )
+        .await;
+
+        let storage = storage_with_ceiling(&endpoint, 100 * 1024);
+        let err = storage
+            .download("repos/opaque/packs/deadbeef")
+            .await
+            .expect_err("F-2: an undeclared body over the ceiling must be aborted");
+
+        assert!(
+            err.to_string().contains("ceiling"),
+            "the refusal must name the ceiling: {err}"
+        );
+    }
+
+    /// Positive control: a legitimate under-ceiling object still downloads
+    /// byte-for-byte. A guard that also broke normal reads would be worse than
+    /// the defect.
+    #[tokio::test]
+    async fn under_ceiling_object_downloads_intact() {
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let endpoint = spawn_hostile_provider(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()),
+            payload.clone(),
+        )
+        .await;
+
+        let storage = storage_with_ceiling(&endpoint, 64 * 1024);
+        let got = storage.download("repos/opaque/packs/deadbeef").await.unwrap();
+        assert_eq!(got, payload);
+    }
+
+    /// A config serialized before the ceiling existed must deserialize with the
+    /// default rather than failing or landing on 0 (which would refuse every
+    /// object).
+    #[test]
+    fn legacy_config_without_ceiling_gets_the_default() {
+        let legacy = r#"{
+            "endpoint": "https://s3.us-west-000.backblazeb2.com",
+            "bucket": "b",
+            "access_key_id": "k",
+            "secret_access_key": "s",
+            "region": "us-west-000",
+            "prefix": null
+        }"#;
+        let config: S3Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.max_object_bytes, DEFAULT_MAX_OBJECT_BYTES);
     }
 }

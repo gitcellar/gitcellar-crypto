@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/gitcellar/gitcellar-crypto/blob/main/SECURITY.md
+    about: Please do not open a public issue for a vulnerability. SECURITY.md has the private reporting channel and PGP key.
+  - name: GitCellar security page
+    url: https://gitcellar.com/security
+    about: Whitepaper, threat model, and responsible-disclosure policy.

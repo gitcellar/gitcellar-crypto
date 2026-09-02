@@ -8,8 +8,8 @@
 //! password-protected. Users are expected to store the file securely, just
 //! like they would protect a house key or SSH private key.
 //!
-//! See `docs/architecture/identity/GCKEY_AND_PASSKEY_ARCHITECTURE.md` for the full
-//! design rationale.
+//! The full design rationale is in the "gckey and passkey architecture"
+//! design document.
 
 use crate::error::{CryptoError, Result};
 use crate::Identity;

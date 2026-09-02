@@ -143,6 +143,7 @@ fn find_invalid_words(phrase: &str) -> Vec<String>;
 
 ## Design Documents
 
-- `docs/architecture/identity/IDENTITY_STATE_MACHINE.md` - State machine validation
-- `docs/architecture/identity/MULTI_USER_ARCHITECTURE.md` - Multi-user support
-- `docs/architecture/identity/GCKEY_AND_PASSKEY_ARCHITECTURE.md` - Passkey-first design
+- Security whitepaper — https://gitcellar.com/security/whitepaper
+- Identity state machine — startup identity validation (internal design document)
+- Multi-user architecture — per-user identity directories (internal design document)
+- gckey and passkey architecture — passkey-first design (internal design document)

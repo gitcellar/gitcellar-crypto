@@ -2,11 +2,12 @@
 name = "vault-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["GitCellar, LLC"]
-description = "Cross-platform encrypted backup library - chunking, encryption, and S3-compatible cloud storage"
+description = "Content-defined chunking, XChaCha20-Poly1305 chunk encryption, and S3-compatible cloud storage"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gitcellar/gitcellar-crypto"
-keywords = ["encryption", "backup", "s3", "gpg", "chunking"]
+keywords = ["encryption", "backup", "s3", "chunking", "xchacha20"]
 categories = ["cryptography", "filesystem"]
 
 [lib]
@@ -14,56 +15,55 @@ categories = ["cryptography", "filesystem"]
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = ["gpg"]
-# GPG/OpenPGP encryption (default)
+default = []
+# Retained as a no-op for backward-compatible feature selection. The
+# OpenPGP-per-chunk engine was retired; vault-core contains no OpenPGP code.
+# Chunk encryption is XChaCha20-Poly1305 (`XChaChaChunkEngine`).
 gpg = []
-# AES-only encryption (no GPG dependency, simpler key management)
+# AES-only encryption helper (`.gckey` passphrase / FFI; not chunks)
 aes-only = []
 # FFI exports for C/C#/other languages
 ffi = []
 
 [dependencies]
-# Async runtime
 tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "fs", "io-util"] }
 
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Error handling
 anyhow = "1.0"
 thiserror = "1.0"
-
-# Logging
 tracing = "0.1"
 
-# Cryptography - hashing
+# Hashing
 sha2 = "0.10"
+# Keyed BLAKE3 derives the per-repo Gear table for keyed content-defined chunking
+blake3 = "1"
 base64 = "0.21"
 hex = "0.4"
 
-# Cryptography - symmetric encryption (for AES-only mode and .gckey files)
-aes-gcm = "0.10"
+# Symmetric encryption
+aes-gcm = "0.10"          # .gckey / FFI passphrase helper (not the chunk path)
+chacha20poly1305 = "0.10" # chunk AEAD: XChaCha20-Poly1305, 192-bit nonce
 argon2 = "0.5"
 hkdf = "0.12"
 rand = "0.8"
 hmac = "0.12"
 
-# HTTP client (for S3/B2 storage)
-reqwest = { version = "0.11", features = ["json", "stream"] }
+# HTTP client (S3-compatible storage)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# Size-bounded reads of provider responses - the provider is untrusted
+bounded-http = { path = "../bounded-http" }
 url = "2.5"
 urlencoding = "2.1"
-
-# Lightweight regex for XML parsing
 regex-lite = "0.1"
 
-# Utilities
 async-trait = "0.1"
 dirs = "5.0"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# FFI support (for C bindings)
+# FFI support (C bindings)
 libc = "0.2"
 
 [dev-dependencies]
@@ -71,15 +71,8 @@ tokio = { version = "1.35", features = ["full", "test-util"] }
 tempfile = "3.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Platform-specific cryptography backends for Sequoia OpenPGP
-[target.'cfg(windows)'.dependencies]
-sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-cng"] }
-
-[target.'cfg(not(windows))'.dependencies]
-sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-nettle"] }
-
 [build-dependencies]
-cbindgen = "0.26"
+cbindgen = "0.28"
 
 [package.metadata.docs.rs]
 all-features = true

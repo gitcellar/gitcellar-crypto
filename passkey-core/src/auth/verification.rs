@@ -216,6 +216,7 @@ mod tests {
             {
                 let message = Message::new(&mut sig);
                 let mut signer = Signer::new(message, keypair)
+                    .expect("construct signer")
                     .detached()
                     .build()
                     .expect("build detached signer");

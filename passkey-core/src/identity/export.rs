@@ -64,7 +64,7 @@ impl Identity {
         // Extract user ID
         let user_id = cert.userids()
             .next()
-            .and_then(|uid| String::from_utf8(uid.value().to_vec()).ok())
+            .and_then(|uid| String::from_utf8(uid.userid().value().to_vec()).ok())
             .unwrap_or_else(|| "unknown".to_string());
 
         Ok(Self { cert, user_id })
@@ -84,7 +84,7 @@ impl Identity {
         // Extract user ID
         let user_id = cert.userids()
             .next()
-            .and_then(|uid| String::from_utf8(uid.value().to_vec()).ok())
+            .and_then(|uid| String::from_utf8(uid.userid().value().to_vec()).ok())
             .unwrap_or_else(|| "unknown".to_string());
 
         Ok(Self { cert, user_id })

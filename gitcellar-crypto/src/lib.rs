@@ -37,7 +37,27 @@
 pub mod encryption;
 pub mod transfer;
 pub mod cloud_backup;
+pub mod broadcast;
+pub mod canonical;
+pub mod grant_signing;
 mod error;
+
+// Client machinery for an auditable append-only public-key log. In development
+// and not yet shipped; feature-gated, and not included in the published crate.
+#[cfg(feature = "key-directory")]
+pub mod key_directory;
+#[cfg(feature = "key-directory")]
+pub use key_directory::*;
+
+// Multi-Device Recovery (ADR-019) — hierarchical device identity.
+// These modules are independent of the Sequoia OpenPGP encryption stack
+// above and use raw Ed25519 over canonical CBOR for device-cert and
+// revocation-cert transport. See the Multi-Device Recovery specification.
+pub mod master;
+pub mod device_cert;
+pub mod revocation_cert;
+pub mod keystore;
+pub mod legacy_extract;
 
 // Re-export identity types from gitcellar-identity (wraps passkey-core)
 pub use gitcellar_identity::Identity;
@@ -51,6 +71,34 @@ pub use gitcellar_identity::multi_user::{IdentityState, UserInfo};
 pub use gitcellar_identity::{
     config_dir, users_dir, user_dir,
 };
+
+// L-3: the ONE machine-id derivation/validation pair (gitcellar-identity →
+// passkey-core, `gcm` prefix, FULL fingerprint). Re-exported so consumers that
+// only depend on gitcellar-crypto (the Service) delegate here instead of
+// hand-rolling a copy — a second copy of a device-identity rule is exactly how
+// the Service drifted to a 64-bit truncation while every other tier widened,
+// and the Cloud then rejected every machine_id it claimed.
+pub use gitcellar_identity::{is_valid_gcm_machine_id, machine_id as derive_machine_id};
+
+// At-rest key wrap (F5 / DEC-LD-03) — re-exported so every consumer (desktop,
+// cli, test-helper, migration) opens sealed key files through one entry point.
+pub use gitcellar_identity::keywrap;
+
+/// Open an at-rest-sealed OpenPGP secret key (`secret.pgp`), transparently
+/// passing through a legacy (pre-F5) plaintext certificate (F5 / AC-F5.4).
+///
+/// Every raw reader of `secret.pgp` that parses the certificate (the MDR
+/// migration, the grant-decrypt CLI, etc.) must funnel the file bytes through
+/// this before `Cert::from_bytes`, so a sealed identity loads identically to a
+/// legacy plaintext one.
+pub fn open_secret_key_at_rest(raw: &[u8]) -> Result<Vec<u8>> {
+    if keywrap::is_wrapped(raw) {
+        keywrap::unwrap_at_rest(raw)
+            .map_err(|e| CryptoError::KeyLoad(format!("secret key at-rest open failed: {e}")))
+    } else {
+        Ok(raw.to_vec())
+    }
+}
 // Re-export identity module for load_active() etc.
 pub use gitcellar_identity::identity as identity_ops;
 
@@ -118,9 +166,36 @@ pub use gitcellar_identity::multi_user::{
 
 // Local exports
 pub use encryption::EncryptionEngine;
+pub use encryption::object_key_prefix_hex;
+// H-1: per-chunk identity bound into the AEAD — consumers construct this for
+// every chunk seal/open (re-exported from vault-core).
+pub use vault_core::chunk_format::ChunkAad;
 pub use transfer::IdentityBundle;
 pub use cloud_backup::{CloudBackupBundle, EncryptedPayload, PasskeyPayload};
 pub use error::{CryptoError, Result};
+
+// Multi-Device Recovery re-exports (ADR-019). Downstream consumers (Cloud API, Desktop
+// migration and onboarding, Authorized Devices UI) import canonical types from these.
+pub use master::{MasterKeyDerivation, MasterKeyError, MaterializedMaster};
+pub use device_cert::{
+    CertError, DeviceCertificate, DeviceCertificatePayload, SignerRole, MAX_LABEL_BYTES,
+};
+pub use revocation_cert::{
+    RevocationCertError, RevocationCertificate, RevocationCertificatePayload, RevocationReason,
+};
+pub use keystore::{
+    FileSystemKeystore, KeystoreBackend, KeystoreError, DEVICE_CERT_FILENAME,
+    DEVICE_PRIVATE_FILENAME, DEVICE_PUBLIC_FILENAME, MASTER_PUBLIC_FILENAME,
+};
+pub use legacy_extract::{
+    armored_public_key, extract_ed25519_keypair, extract_ed25519_public_key,
+    LegacyEd25519Keypair, LegacyExtractError,
+};
+pub use broadcast::{
+    action_url_allowed, verify_detached, BroadcastPayload, BroadcastTargeting, BroadcastTier,
+    IncidentManifest, ManifestState, ManifestVerdict, ACTION_URL_ALLOWLIST,
+    BROADCAST_PAYLOAD_VERSION, INCIDENT_MANIFEST_VERSION,
+};
 
 use std::path::PathBuf;
 

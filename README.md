@@ -1,5 +1,8 @@
 # gitcellar-crypto
 
+[![CI](https://github.com/gitcellar/gitcellar-crypto/actions/workflows/ci.yml/badge.svg)](https://github.com/gitcellar/gitcellar-crypto/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 The open-source cryptographic foundation of [GitCellar](https://gitcellar.com) — zero-access encrypted Git hosting.
 
 This repository contains the encryption pipeline's core crates: key generation, identity management, content chunking, and encryption/decryption. We publish this so that security researchers and users can audit exactly how GitCellar protects your code.
@@ -16,8 +19,9 @@ gitcellar-identity             GitCellar-specific identity configuration
 gitcellar-crypto -----> vault-core
     |                      |
     |                      Content-defined chunking (CDC)
-    |                      XChaCha20-Poly1305 chunk AEAD (F2)
-    |                      S3-compatible cloud storage
+    |                      XChaCha20-Poly1305 chunk AEAD
+    |                      S3-compatible cloud storage (bounded-http
+    |                      caps every provider response read)
     |
     Identity keys, .gckey transfer,
     cloud backup with recovery codes
@@ -31,6 +35,7 @@ gitcellar-crypto -----> vault-core
 | **[gitcellar-identity](gitcellar-identity/)** | Thin wrapper that applies GitCellar defaults (app name, path conventions) to passkey-core. |
 | **[gitcellar-crypto](gitcellar-crypto/)** | High-level encryption API. Holds the OpenPGP identity and key-grant paths, delegates chunk sealing to vault-core's XChaCha20-Poly1305 engine, handles `.gckey` identity transfer files, and provides cloud backup bundles encrypted with recovery codes. |
 | **[vault-core](vault-core/)** | Content-defined chunking (CDC) for deduplication, chunk encryption (XChaCha20-Poly1305 AEAD under a per-repo HKDF-SHA256-derived content key), and S3-compatible cloud storage abstraction (Backblaze B2, Wasabi, AWS S3, MinIO). Also hosts `AesEncryptionEngine` (AES-256-GCM), the passphrase-derived engine used by FFI consumers — that is not the chunk path. |
+| **[bounded-http](bounded-http/)** | Size-bounded reads of untrusted HTTP response bodies. The storage provider is treated as an adversary, so no response is buffered past a fixed ceiling; one implementation shared by every provider-facing code path. |
 
 ## Algorithms
 
@@ -63,7 +68,7 @@ The user's private key never leaves their machine, and the storage provider sees
 
 ## Building
 
-Requires Rust 1.75+ and platform-specific dependencies for Sequoia OpenPGP:
+Requires Rust 1.85 or newer (checked in CI) and platform-specific dependencies for Sequoia OpenPGP:
 
 **Windows:**
 ```bash
@@ -73,9 +78,9 @@ cargo build
 
 **macOS/Linux:**
 ```bash
-# Requires Nettle cryptographic library
-# Ubuntu/Debian: apt install nettle-dev
-# macOS: brew install nettle
+# Requires the Nettle cryptographic library (and libclang for its bindings)
+# Ubuntu/Debian: apt install nettle-dev libclang-dev pkg-config
+# macOS: brew install nettle pkg-config
 cargo build
 ```
 
@@ -83,7 +88,12 @@ cargo build
 
 ```bash
 cargo test --workspace
+cargo audit            # RustSec advisory check; cargo install cargo-audit
 ```
+
+CI runs the build and tests on Linux, macOS and Windows, checks the minimum supported Rust
+version, and runs `cargo audit` on every push and weekly. `Cargo.lock` is committed so the
+dependency set you audit is the one we build.
 
 ## Platform Support
 
@@ -97,7 +107,10 @@ Sequoia OpenPGP uses platform-native cryptographic backends:
 
 ## Scope of This Repository
 
-These crates are the core of GitCellar's encryption pipeline, not the whole of it. Some components — notably the parts of the key-management stack that are still being built — are not published here yet. What is here is what runs.
+These five crates are the core of GitCellar's encryption pipeline, not the whole of it. The
+network services, the Desktop application and the Git forge are not published. One piece of
+the key-management stack — a client for an auditable append-only public-key log — is still being built; it is
+gated off in the product and not published here until it ships. What is here is what runs.
 
 ## License
 

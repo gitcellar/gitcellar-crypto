@@ -39,8 +39,8 @@
 //! Path C). If PRF is ever unstruck, it may only be an *opportunistic convenience
 //! unlock layered over Path A* — never the root of the hierarchy, never a sole escrow.
 //!
-//! Full finding + revisit trigger: `docs/architecture/identity/MULTI_DEVICE_RECOVERY_SPEC.md`
-//! § "Recovery Surfaces" and ADR-012.
+//! The full analysis and the revisit trigger are recorded in the Multi-Device
+//! Recovery specification (§ "Recovery Surfaces").
 //!
 //! # Zero-Access Property
 //!

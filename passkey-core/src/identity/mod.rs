@@ -65,7 +65,15 @@ impl Identity {
     pub fn generate(user_id: &str) -> Result<Self> {
         info!("Generating new identity for: {}", user_id);
 
+        // Pin the OpenPGP key version to v4 (RFC 4880). Sequoia 2.x added
+        // RFC 9580 ("v6") key support behind a `Profile`; v4 is 2.4.x's default
+        // but pinning it explicitly means a future upstream default flip cannot
+        // silently change our fingerprint format and break interop with every
+        // already-stored identity. Asserted by `identity_generates_v4_keys`
+        // (tests/cert_profile_v4.rs).
         let (cert, _revocation) = CertBuilder::new()
+            .set_profile(openpgp::Profile::RFC4880)
+            .map_err(|e| PasskeyError::KeyGeneration(e.to_string()))?
             .add_userid(user_id)
             .set_cipher_suite(CipherSuite::Cv25519)
             .add_signing_subkey()
@@ -134,7 +142,7 @@ impl Identity {
         // Extract user ID
         let user_id = cert.userids()
             .next()
-            .and_then(|uid| String::from_utf8(uid.value().to_vec()).ok())
+            .and_then(|uid| String::from_utf8(uid.userid().value().to_vec()).ok())
             .unwrap_or_else(|| "unknown".to_string());
 
         info!("Loaded identity: {} ({})", user_id, cert.fingerprint());

@@ -90,7 +90,7 @@ Derive stable machine identifiers from identity fingerprints:
 use passkey_core::auth::{derive_machine_id_from_identity, is_valid_machine_id};
 
 let machine_id = derive_machine_id_from_identity(&config, &identity);
-// Returns: "mya-a1b2c3d4e5f6a7b8" (prefix + first 16 chars of fingerprint)
+// Returns: "mya-<fingerprint hex>" (prefix + the key's whole fingerprint, lowercased)
 
 assert!(is_valid_machine_id(&config, &machine_id));
 ```
@@ -107,6 +107,8 @@ let code = generate_recovery_code()?;
 println!("{}", code.format_with_numbers());
 
 // Derive key material for encrypting backups
+// (domain-separated HKDF-SHA256 over the BIP39 seed,
+//  info = "gitcellar-passkey-recovery-v1" — see RecoveryKeyDerivation)
 let key = code.derive_key_material();
 
 // Later, restore from phrase
@@ -154,4 +156,4 @@ passkey-core = { version = "0.1", default-features = false, features = ["keyring
 
 ## License
 
-MIT
+MIT OR Apache-2.0, at your option.

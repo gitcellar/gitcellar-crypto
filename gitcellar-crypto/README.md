@@ -47,12 +47,13 @@ Files per user:
 
 ```rust
 use gitcellar_crypto::Identity;
+use gitcellar_identity::identity;
 
 // Generate a new identity with Ed25519/X25519 keys
 let identity = Identity::generate("user@example.com")?;
 
-// Save to the standard location
-identity.save()?;
+// Save it under a username in the standard per-user location
+identity::save(&identity, "alice")?;
 
 // Get the fingerprint
 println!("Fingerprint: {}", identity.fingerprint());
@@ -109,14 +110,14 @@ protected - the file itself IS the key. Store it securely.
 use gitcellar_crypto::{Identity, IdentityBundle};
 
 // On source machine: Export identity
-let identity = Identity::load()?;
+let identity = gitcellar_identity::identity::load("alice")?;
 let gckey_data = IdentityBundle::export(&identity)?;
 std::fs::write("backup.gckey", &gckey_data)?;
 
 // On target machine: Import from .gckey file
 let gckey_data = std::fs::read_to_string("backup.gckey")?;
 let identity = IdentityBundle::import(&gckey_data)?;
-identity.save()?;
+gitcellar_identity::identity::save(&identity, "alice")?;
 ```
 
 ## Public API
@@ -126,11 +127,11 @@ identity.save()?;
 ```rust
 impl Identity {
     fn generate(user_id: &str) -> Result<Self>;
-    fn load() -> Result<Self>;
     fn load_from(path: &Path) -> Result<Self>;
-    fn exists() -> bool;
-    fn save(&self) -> Result<()>;
+    fn load_user(config: &PasskeyConfig, username: &str) -> Result<Self>;
+    fn exists_for_user(config: &PasskeyConfig, username: &str) -> bool;
     fn save_to(&self, path: &Path) -> Result<()>;
+    fn save_for_user(&self, config: &PasskeyConfig, username: &str) -> Result<()>;
     fn fingerprint(&self) -> String;
     fn key_id(&self) -> String;
     fn user_id(&self) -> &str;
@@ -139,6 +140,9 @@ impl Identity {
     fn from_armored_secret_key(armored: &str) -> Result<Self>;
 }
 ```
+
+`gitcellar_identity::identity::{generate, load, load_active, exists, save}` wrap the same calls
+with GitCellar's app defaults, keyed by username.
 
 ### EncryptionEngine
 
@@ -226,7 +230,7 @@ let code = RecoveryCode::from_phrase("word1 word2 ... word24")?;
 use gitcellar_crypto::{CloudBackupBundle, Identity};
 
 // Create backup encrypted with recovery code
-let identity = Identity::load()?;
+let identity = gitcellar_identity::identity::load("alice")?;
 let key_material = code.derive_key_material();
 let bundle = CloudBackupBundle::create_with_recovery_code(&identity, &key_material)?;
 

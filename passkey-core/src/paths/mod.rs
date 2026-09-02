@@ -16,7 +16,7 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct PasskeyConfig {
     /// Application name (used for paths and credential store service name)
-    /// Example: "gitcellar", "foldergami", "vetiqbox"
+    /// Example: "gitcellar"
     pub app_name: String,
 
     /// Machine ID prefix (e.g., "gcm" for "gcm-a1b2c3d4...")

@@ -2,6 +2,7 @@
 name = "passkey-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["GitCellar, LLC"]
 description = "Cross-platform PassKey-native authentication library - Ed25519 identity management, challenge-response auth, and BIP39 recovery"
 license = "MIT OR Apache-2.0"
@@ -22,40 +23,32 @@ jwt = ["dep:jsonwebtoken"]
 ffi = []
 
 [dependencies]
-# Error handling
 anyhow = "1.0"
 thiserror = "1.0"
-
-# Logging
 tracing = "0.1"
 
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Cryptography utilities
 sha2 = "0.10"
+hkdf = "0.12"
 hex = "0.4"
 rand = "0.8"
 base64 = "0.21"
 
-# At-rest key wrap: AES-256-GCM seal for key material at rest (src/keywrap.rs).
-# Not the chunk path.
+# At-rest key wrap (OS keyring / DPAPI-sealed key material)
 aes-gcm = "0.10"
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 
 # BIP39 recovery codes
 bip39 = "2.0"
 
-# Platform utilities
 dirs = "5.0"
 hostname = "0.3"
 
-# Optional: OS keyring. The platform-backend features are REQUIRED: keyring v3
-# falls back to an in-memory mock store when no backend is enabled, which would
-# make at-rest seal/unseal (src/keywrap.rs) silently non-persistent across
-# processes. This crate owns that sealing, so it enables its own backend rather
-# than depending on a downstream crate to turn one on via feature unification.
+# Optional: OS keyring. The platform-backend features are required: keyring v3
+# defaults to an in-memory mock store when no backend is enabled, which would
+# make at-rest seal/unseal silently non-persistent across processes.
 keyring = { version = "3", optional = true, features = ["windows-native", "apple-native", "linux-native"] }
 
 # Optional: JWT
@@ -63,7 +56,6 @@ jsonwebtoken = { version = "9.3", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
-# FFI
 libc = "0.2"
 
 [dev-dependencies]
@@ -73,7 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Sequoia OpenPGP - platform-specific backends
 [target.'cfg(windows)'.dependencies]
-sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-cng"] }
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-cng"] }
 
 [target.'cfg(not(windows))'.dependencies]
-sequoia-openpgp = { version = "1.17", default-features = false, features = ["crypto-nettle"] }
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-nettle"] }

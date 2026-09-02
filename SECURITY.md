@@ -8,9 +8,9 @@ If you discover a security vulnerability in this library, please report it respo
 
 **PGP Key Fingerprint:** `18CD 743B 8466 AC30 E0F2 906D 0F86 4367 649D 627D`
 
-The PGP public key is available at: https://gitcellar.com/.well-known/security-pgp-key.asc
+The PGP public key is committed in this repository as [`security-pgp-key.asc`](security-pgp-key.asc) and is also published at https://gitcellar.com/.well-known/security-pgp-key.asc (linked from the site's `security.txt`).
 
-We will acknowledge your report within 48 hours and aim to provide a fix within 7 days for critical issues.
+We will acknowledge your report within 2 business days and confirm within 5 business days whether it is a valid vulnerability, with an initial severity. We keep you informed of the fix timeline and publish an advisory, with credit, once the fix has shipped. The full policy — scope, safe-harbour terms and recognition — is at https://gitcellar.com/security/responsible-disclosure.
 
 ## Scope
 
@@ -18,7 +18,8 @@ This policy covers the cryptographic implementation in this repository:
 
 - Key generation and management (`passkey-core`)
 - Encryption and decryption (`gitcellar-crypto`, `vault-core`)
-- Content-defined chunking (`vault-core`)
+- Content-defined chunking and pack assembly (`vault-core`)
+- Bounded reads of storage-provider responses (`bounded-http`)
 - Identity and authentication primitives (`passkey-core`)
 
 ## What We Consider Vulnerabilities

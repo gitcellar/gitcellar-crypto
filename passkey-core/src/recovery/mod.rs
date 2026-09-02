@@ -8,7 +8,8 @@
 //!
 //! - 24 words = 256 bits of entropy
 //! - User must save it (shown only once during setup)
-//! - Derives deterministic 32-byte key material for encryption
+//! - Derives deterministic 32-byte key material for encryption via
+//!   domain-separated HKDF-SHA256 (`gitcellar-passkey-recovery-v1`)
 //!
 //! # Example
 //!
@@ -31,11 +32,50 @@ pub use derive::*;
 
 use crate::error::{PasskeyError, Result};
 use bip39::{Language, Mnemonic};
+use hkdf::Hkdf;
 use rand::RngCore;
+use sha2::Sha256;
 use tracing::{debug, info};
+use zeroize::Zeroizing;
 
 /// Number of words in a recovery code
 pub const RECOVERY_CODE_WORD_COUNT: usize = 24;
+
+/// Algorithm identity for the recovery key-material derivation scheme.
+///
+/// Mirrors `MasterKeyDerivation` in gitcellar-crypto's `master.rs`
+/// (the house HKDF idiom): a zero-sized anchor exposing the canonical
+/// derivation constants. Bumping [`Self::VERSION`] requires a corresponding
+/// bump to [`Self::DERIVATION_INFO`] so older and newer derivations cannot
+/// collide.
+///
+/// # Why domain separation (added pre-launch, 2026-07-20)
+///
+/// The same 24-word phrase / BIP39 seed feeds two independent keys:
+///
+/// 1. The **master keypair** (`gitcellar-crypto::master`) — HKDF-SHA256 with
+///    `info = b"gitcellar-master-v1"`.
+/// 2. This **recovery/escrow key material** — which, before 2026-07-20, was
+///    the raw seed's first 32 bytes with **no** domain tag.
+///
+/// The untagged form was not a live collision (the two derivations were
+/// separate by construction), but it left a latent hazard: any future third
+/// use of the seed could collide with the escrow key that guards the
+/// `identity_backups` cloud blob — the only cloud account-recovery path.
+/// The derivation was switched to domain-separated
+/// HKDF-SHA256 while there were **zero production escrow blobs** — so the
+/// cutover was free.
+pub struct RecoveryKeyDerivation;
+
+impl RecoveryKeyDerivation {
+    /// HKDF `info` parameter for domain separation. Bumping this makes every
+    /// existing escrow bundle and recovery identifier underivable — after
+    /// launch, only do this in a planned migration.
+    pub const DERIVATION_INFO: &'static [u8] = b"gitcellar-passkey-recovery-v1";
+
+    /// Schema version of the derivation.
+    pub const VERSION: u32 = 1;
+}
 
 /// A BIP39 recovery code (24-word mnemonic)
 ///
@@ -78,18 +118,29 @@ impl RecoveryCode {
 
     /// Derive 32-byte key material from the recovery code
     ///
-    /// Uses BIP39 seed derivation to produce deterministic key material
-    /// suitable for encrypting/decrypting identity backups.
+    /// Deterministic derivation suitable for encrypting/decrypting identity
+    /// backups (the `identity_backups` escrow bundle) and for the derived
+    /// verification hash / identifier in `derive.rs`. The flow is:
+    ///
+    /// 1. BIP39 PBKDF2-HMAC-SHA512 with empty passphrase → 64-byte seed.
+    /// 2. HKDF-SHA256 expand the seed with
+    ///    `info = b"gitcellar-passkey-recovery-v1"` → 32 bytes.
+    ///
+    /// The HKDF `info` tag domain-separates this key from every other use of
+    /// the same seed (notably the master keypair, `gitcellar-master-v1` in
+    /// `gitcellar-crypto::master`) — see [`RecoveryKeyDerivation`] for the
+    /// rationale and the pre-launch cutover note (2026-07-20; the previous
+    /// derivation was the raw seed's first 32 bytes, untagged).
     pub fn derive_key_material(&self) -> [u8; 32] {
-        // Use BIP39's built-in seed derivation with empty password
-        // This gives us 64 bytes derived from the mnemonic
-        let seed = self.mnemonic.to_seed("");
+        // The 64-byte BIP39 seed is an intermediate secret — wipe it on exit.
+        let seed: Zeroizing<[u8; 64]> = Zeroizing::new(self.mnemonic.to_seed(""));
 
-        // Use first 32 bytes as key material
         let mut key_material = [0u8; 32];
-        key_material.copy_from_slice(&seed[..32]);
+        Hkdf::<Sha256>::new(None, seed.as_ref())
+            .expand(RecoveryKeyDerivation::DERIVATION_INFO, &mut key_material)
+            .expect("HKDF-SHA256 expand to 32 bytes cannot fail");
 
-        debug!("Derived key material from recovery code");
+        debug!("Derived key material from recovery code (HKDF, domain-separated)");
         key_material
     }
 
@@ -267,6 +318,47 @@ mod tests {
 
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_key_material_known_answer() {
+        // Known-answer test pinning the HKDF-SHA256 domain-separated
+        // derivation (info = "gitcellar-passkey-recovery-v1", cutover
+        // 2026-07-20). If this test breaks, every existing escrow bundle
+        // and recovery identifier becomes underivable — post-launch that
+        // is a migration, not a refactor.
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon art";
+
+        let code = RecoveryCode::from_phrase(phrase).unwrap();
+        let key = code.derive_key_material();
+
+        assert_eq!(
+            hex::encode(key),
+            "226eaf013aa3d5a947c85fa0db92b348eb068f8d2da3723a38f0cb7b58c0528a"
+        );
+
+        // Guard against silent regression to the pre-2026-07-20 derivation
+        // (raw first 32 bytes of the BIP39 seed, no domain tag).
+        assert_ne!(
+            hex::encode(key),
+            "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf70",
+            "derive_key_material regressed to the untagged raw-seed derivation"
+        );
+    }
+
+    #[test]
+    fn test_derivation_info_pinned() {
+        // If anyone changes DERIVATION_INFO, every existing escrow bundle
+        // becomes unrecoverable. This pins the value; breaking it forces the
+        // author to confront the migration question. (Same pattern as
+        // `derivation_info_pinned` in gitcellar-crypto's master.rs.)
+        assert_eq!(
+            RecoveryKeyDerivation::DERIVATION_INFO,
+            b"gitcellar-passkey-recovery-v1"
+        );
+        assert_eq!(RecoveryKeyDerivation::VERSION, 1);
     }
 
     #[test]
