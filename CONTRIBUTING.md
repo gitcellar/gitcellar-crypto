@@ -39,6 +39,7 @@ cargo test --workspace
 cargo audit          # cargo install cargo-audit
 ```
 
-Linux and macOS need Nettle for the Sequoia OpenPGP backend (`apt install nettle-dev libclang-dev
-pkg-config`, or `brew install nettle pkg-config`). Windows uses the built-in CNG backend. The
-minimum supported Rust version is 1.85.
+Linux needs Nettle for the Sequoia OpenPGP backend (`apt install nettle-dev libclang-dev
+pkg-config`). macOS needs Nettle 3.x built from source, because Homebrew's Nettle 4 dropped a header
+the bindings use; the macOS job in `.github/workflows/ci.yml` is the tested recipe. Windows uses the built-in CNG backend. The
+minimum supported Rust version is 1.88.

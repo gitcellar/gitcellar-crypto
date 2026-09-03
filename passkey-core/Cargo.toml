@@ -2,7 +2,7 @@
 name = "passkey-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["GitCellar, LLC"]
 description = "Cross-platform PassKey-native authentication library - Ed25519 identity management, challenge-response auth, and BIP39 recovery"
 license = "MIT OR Apache-2.0"

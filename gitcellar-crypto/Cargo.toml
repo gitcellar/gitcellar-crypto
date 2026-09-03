@@ -2,7 +2,7 @@
 name = "gitcellar-crypto"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["GitCellar, LLC"]
 description = "Encryption library for GitCellar - Sequoia-based OpenPGP identity, key grants, and cloud backup"
 license = "MIT OR Apache-2.0"

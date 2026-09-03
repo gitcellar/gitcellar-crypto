@@ -2,7 +2,7 @@
 name = "vault-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["GitCellar, LLC"]
 description = "Content-defined chunking, XChaCha20-Poly1305 chunk encryption, and S3-compatible cloud storage"
 license = "MIT OR Apache-2.0"

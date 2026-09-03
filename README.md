@@ -68,7 +68,7 @@ The user's private key never leaves their machine, and the storage provider sees
 
 ## Building
 
-Requires Rust 1.85 or newer (checked in CI) and platform-specific dependencies for Sequoia OpenPGP:
+Requires Rust 1.88 or newer (checked in CI) and platform-specific dependencies for Sequoia OpenPGP:
 
 **Windows:**
 ```bash
@@ -76,13 +76,17 @@ Requires Rust 1.85 or newer (checked in CI) and platform-specific dependencies f
 cargo build
 ```
 
-**macOS/Linux:**
+**Linux:**
 ```bash
 # Requires the Nettle cryptographic library (and libclang for its bindings)
 # Ubuntu/Debian: apt install nettle-dev libclang-dev pkg-config
-# macOS: brew install nettle pkg-config
 cargo build
 ```
+
+**macOS:** Sequoia's Nettle backend needs **Nettle 3.x**. Homebrew now ships Nettle 4, which
+removed a header the bindings still include, so `brew install nettle` is not enough: build Nettle
+3.10 from source and point `PKG_CONFIG_PATH` and `BINDGEN_EXTRA_CLANG_ARGS` at it. The macOS job
+in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) is the exact, tested recipe.
 
 ## Running Tests
 

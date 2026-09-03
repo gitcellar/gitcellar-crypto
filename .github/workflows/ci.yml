@@ -29,19 +29,31 @@ jobs:
       - name: Install Nettle (Sequoia OpenPGP backend on Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y nettle-dev libclang-dev pkg-config
-      - name: Install Nettle (Sequoia OpenPGP backend on macOS)
+      - name: Build Nettle 3 (Sequoia OpenPGP backend on macOS)
+        # Homebrew ships Nettle 4, which deleted the pgp.h header that
+        # nettle-sys still binds, so Sequoia's Nettle backend needs Nettle 3.x.
         if: runner.os == 'macOS'
-        run: brew install nettle pkg-config
+        run: |
+          brew install gmp pkg-config m4
+          curl -sSLO https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz
+          tar xzf nettle-3.10.2.tar.gz
+          cd nettle-3.10.2
+          ./configure --prefix="$HOME/nettle3" --disable-documentation \
+            CPPFLAGS="-I$(brew --prefix gmp)/include" LDFLAGS="-L$(brew --prefix gmp)/lib"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          echo "PKG_CONFIG_PATH=$HOME/nettle3/lib/pkgconfig:$(brew --prefix gmp)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HOME/nettle3/include" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
   msrv:
-    name: minimum supported Rust (1.85)
+    name: minimum supported Rust (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - run: sudo apt-get update && sudo apt-get install -y nettle-dev libclang-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
