@@ -13,11 +13,17 @@ categories = ["cryptography"]
 # The `key-directory` feature (client for an auditable public-key log) exists in the
 # in-tree build and is not part of this published crate yet; the cfg is declared
 # here so the compiler knows the gate is intentional.
+[features]
+default = ["keyring"]
+# OS-keyring/DPAPI sealing of key material at rest (passkey-core keyring).
+# Routed here so a workspace `--no-default-features` build really turns it off.
+keyring = ["gitcellar-identity/keyring"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("key-directory"))'] }
 
 [dependencies]
-gitcellar-identity = { path = "../gitcellar-identity" }
+gitcellar-identity = { path = "../gitcellar-identity", default-features = false }
 vault-core = { path = "../vault-core" }
 
 anyhow = "1.0"
