@@ -46,7 +46,11 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HOME/nettle3/include" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+      - name: cargo test
+        # Single-threaded so a hang names the test in the log; the timeout turns
+        # a hang into a failure instead of a six-hour job.
+        timeout-minutes: 30
+        run: cargo test --workspace -- --test-threads=1
 
   msrv:
     name: minimum supported Rust (1.88)
