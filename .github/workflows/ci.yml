@@ -47,10 +47,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - name: cargo test
-        # Single-threaded so a hang names the test in the log; the timeout turns
-        # a hang into a failure instead of a six-hour job.
+        # macOS runs without the OS-keychain feature: GitHub's headless macOS
+        # runners cannot answer the keychain access dialog that a second test
+        # binary triggers when it reads an item the first one created, so the
+        # run hangs. The keychain path is exercised by the Linux and Windows
+        # jobs. The timeout turns any future hang into a failure, not a
+        # six-hour job.
         timeout-minutes: 30
-        run: cargo test --workspace -- --test-threads=1
+        run: cargo test --workspace ${{ runner.os == 'macOS' && '--no-default-features' || '' }}
 
   msrv:
     name: minimum supported Rust (1.88)
