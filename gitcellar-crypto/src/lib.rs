@@ -93,8 +93,17 @@ pub use gitcellar_identity::keywrap;
 /// legacy plaintext one.
 pub fn open_secret_key_at_rest(raw: &[u8]) -> Result<Vec<u8>> {
     if keywrap::is_wrapped(raw) {
-        keywrap::unwrap_at_rest(raw)
-            .map_err(|e| CryptoError::KeyLoad(format!("secret key at-rest open failed: {e}")))
+        #[cfg(feature = "keyring")]
+        {
+            keywrap::unwrap_at_rest(raw)
+                .map_err(|e| CryptoError::KeyLoad(format!("secret key at-rest open failed: {e}")))
+        }
+        #[cfg(not(feature = "keyring"))]
+        {
+            Err(CryptoError::KeyLoad(
+                "secret key is sealed, but this build has no OS-keyring support".to_string(),
+            ))
+        }
     } else {
         Ok(raw.to_vec())
     }

@@ -45,16 +45,27 @@ pub const DEVICE_PRIVATE_FILENAME: &str = "device.key.bin";
 /// transparently accepts both forms. Shared so the desktop migration path and
 /// other writers seal identically.
 pub fn seal_device_seed_at_rest(seed: &[u8; 32]) -> Vec<u8> {
-    match gitcellar_identity::keywrap::wrap_at_rest(seed) {
-        Ok(sealed) => sealed,
-        Err(e) => {
-            tracing::warn!(
-                "At-rest wrap unavailable for device seed ({}); writing unsealed. \
-                 Key material protected by filesystem permissions only.",
-                e
-            );
-            seed.to_vec()
+    #[cfg(feature = "keyring")]
+    {
+        match gitcellar_identity::keywrap::wrap_at_rest(seed) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                tracing::warn!(
+                    "At-rest wrap unavailable for device seed ({}); writing unsealed. \
+                     Key material protected by filesystem permissions only.",
+                    e
+                );
+                seed.to_vec()
+            }
         }
+    }
+    #[cfg(not(feature = "keyring"))]
+    {
+        tracing::warn!(
+            "Built without the keyring feature; writing device seed unsealed. \
+             Key material protected by filesystem permissions only."
+        );
+        seed.to_vec()
     }
 }
 
@@ -63,8 +74,17 @@ pub fn seal_device_seed_at_rest(seed: &[u8; 32]) -> Vec<u8> {
 /// `device.key.bin` opens the seal identically.
 pub fn open_device_seed_at_rest(raw: &[u8]) -> Result<Vec<u8>, KeystoreError> {
     if gitcellar_identity::keywrap::is_wrapped(raw) {
-        gitcellar_identity::keywrap::unwrap_at_rest(raw)
-            .map_err(|e| KeystoreError::InvalidKey(format!("device seed at-rest open failed: {e}")))
+        #[cfg(feature = "keyring")]
+        {
+            gitcellar_identity::keywrap::unwrap_at_rest(raw)
+                .map_err(|e| KeystoreError::InvalidKey(format!("device seed at-rest open failed: {e}")))
+        }
+        #[cfg(not(feature = "keyring"))]
+        {
+            Err(KeystoreError::InvalidKey(
+                "device seed is sealed, but this build has no OS-keyring support".to_string(),
+            ))
+        }
     } else {
         Ok(raw.to_vec())
     }

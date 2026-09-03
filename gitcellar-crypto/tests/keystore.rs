@@ -176,6 +176,8 @@ fn keystore_persists_across_recreated_instances() {
     verify_with_pubkey(&pubkey, b"signed across instances", &sig).unwrap();
 }
 
+// Probes the real OS keyring; only meaningful when the crate is built with it.
+#[cfg(feature = "keyring")]
 #[test]
 fn device_seed_sealed_at_rest_and_round_trips() {
     // F5 / AC-F5.1: when an OS keyring is available, the on-disk

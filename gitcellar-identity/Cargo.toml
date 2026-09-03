@@ -9,11 +9,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gitcellar/gitcellar-crypto"
 
 [features]
-default = ["keyring"]
+default = ["keyring", "jwt"]
+# Forwarded explicitly (and passkey-core pulled without its defaults) so a
+# workspace `--no-default-features` build really turns the OS keyring off.
 keyring = ["passkey-core/keyring"]
+jwt = ["passkey-core/jwt"]
 
 [dependencies]
-passkey-core = { path = "../passkey-core" }
+passkey-core = { path = "../passkey-core", default-features = false }
 
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
