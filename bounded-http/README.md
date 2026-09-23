@@ -1,5 +1,11 @@
 # bounded-http
 
+## Synopsis
+
+The one shared implementation of "read this HTTP response body, but never buffer more than N bytes", for every path that talks to a storage provider — the party the zero-access threat model treats as hostile. Here: `read_body_bounded`, `read_text_bounded`, the 64 MiB object and 64 KiB diagnostic ceilings, and a loopback hostile-provider test.
+
+Not here: retries, auth, chunking or any storage opinion (those belong to the storage backends and `vault-core`), and nothing for `aws-sdk-s3` — a `ByteStream` is not a `reqwest::Response`, so a caller on that SDK must re-apply the same two-guard rule at its own call site.
+
 Size-bounded reads of untrusted HTTP response bodies.
 
 ## Purpose & Responsibilities

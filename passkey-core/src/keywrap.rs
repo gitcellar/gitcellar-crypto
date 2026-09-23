@@ -62,10 +62,16 @@ const NONCE_SIZE: usize = 12;
 /// OS-keyring service name under which the Local Protection Key is stored.
 /// `passkey-core` is vendored specifically for GitCellar, so a fixed service
 /// name is correct here (matches `PasskeyConfig::gitcellar().app_name`).
-const KEYWRAP_SERVICE: &str = "gitcellar";
+///
+/// **Public because the destructive-uninstall credential sweep has to know it.**
+/// It used to be private, so the sweep carried a copied literal with a "keep in
+/// sync" note, and that copy drifted twice.
+pub const KEYWRAP_SERVICE: &str = "gitcellar";
 
 /// OS-keyring entry name for the per-OS-user Local Protection Key (v1).
-const LPK_ENTRY: &str = "at-rest-protection-key-v1";
+/// Public for the same reason as [`KEYWRAP_SERVICE`] — it is swept by name on
+/// the destructive-uninstall path, and a second copy of the name is a defect.
+pub const LPK_ENTRY: &str = "at-rest-protection-key-v1";
 
 /// Whether `data` carries the at-rest wrap magic header.
 ///
@@ -240,30 +246,60 @@ pub fn unwrap_at_rest(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Test-only override so unit tests can exercise the keyring-backed wrappers
 /// deterministically without a real OS keyring (common in CI).
+///
+/// ## Why this is THREAD-LOCAL and not a process-wide static
+///
+/// It used to be a `static Mutex<Option<[u8; 32]>>`, i.e. shared by every test in the
+/// binary — and `cargo test` runs tests in PARALLEL THREADS in one process. So
+/// `at_rest_wrappers_with_test_lpk` clearing the override at the end of its body
+/// (`__set_test_lpk(None)`, which is the correct thing for a test to do with global state)
+/// could land in the middle of an identity test that had installed its own key and was
+/// midway through `Identity::save_to`.
+///
+/// That was not a flake with a cosmetic outcome. With the override gone, `wrap_at_rest`
+/// falls through to the real OS keyring; in a Linux CI container there is no Secret-Service,
+/// so it fails, and `save_to`'s DELIBERATE availability fallback writes the secret key
+/// **unsealed** with a warning. The victim test then reads `secret.pgp` back, finds no wrap
+/// magic, and fails — correctly. It was reporting a real unsealed write caused by a
+/// neighbouring test, which is why it failed ~7 runs in 12 in CI and never once locally,
+/// where Windows DPAPI always answers and the fallback never fires.
+///
+/// A security test that is wrong half the time is one people learn to scroll past, so the
+/// cure has to remove the race rather than mute it. Thread-local does that by construction:
+/// every test owns its own value, no test can clear another's, and tests still run in
+/// parallel (serialising them would also have worked and would have been slower and easier
+/// to forget to apply to the next test).
+///
+/// A test-only escape hatch: it is public so integration tests can reach it, but only test
+/// code calls `__set_test_lpk`, so in GitCellar's shipped binaries the value is `None` on
+/// every thread and the keyring path is the only path. (Being `pub`, it is callable by any
+/// code linking this crate; moving it behind a test-only feature is the tighter form.) `local_protection_key()` reads it on the SAME thread that
+/// is doing the wrap, which is the thread the test installed it on.
 #[cfg(feature = "keyring")]
 mod test_override {
-    use std::sync::{Mutex, OnceLock};
+    use std::cell::Cell;
 
-    static OVERRIDE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
-
-    fn cell() -> &'static Mutex<Option<[u8; 32]>> {
-        OVERRIDE.get_or_init(|| Mutex::new(None))
+    thread_local! {
+        static OVERRIDE: Cell<Option<[u8; 32]>> = const { Cell::new(None) };
     }
 
     pub fn get() -> Option<[u8; 32]> {
-        *cell().lock().unwrap()
+        OVERRIDE.with(|c| c.get())
     }
 
-    /// Install (or clear) a fixed LPK for the current process. Test-only.
+    /// Install (or clear) a fixed LPK for the CURRENT THREAD. Test-only.
     #[doc(hidden)]
     pub fn set(key: Option<[u8; 32]>) {
-        *cell().lock().unwrap() = key;
+        OVERRIDE.with(|c| c.set(key));
     }
 }
 
-/// Install a fixed Local Protection Key for the current process, bypassing the
+/// Install a fixed Local Protection Key for the CURRENT THREAD, bypassing the
 /// OS keyring. **Test-only** — lets crate-unit tests verify the keyring-backed
 /// wrappers without a live keyring. Pass `None` to clear.
+///
+/// Thread-scoped on purpose: see `test_override` for the parallel-test race that a
+/// process-wide override caused, and why it surfaced as an unsealed key on disk.
 #[cfg(feature = "keyring")]
 #[doc(hidden)]
 pub fn __set_test_lpk(key: Option<[u8; 32]>) {
@@ -364,6 +400,46 @@ mod tests {
         // Legacy plaintext passes through unwrap_at_rest unchanged.
         let legacy = b"legacy plaintext secret".to_vec();
         assert_eq!(unwrap_at_rest(&legacy).unwrap(), legacy);
+
+        __set_test_lpk(None);
+    }
+
+    /// The test LPK override must not be visible from another thread.
+    ///
+    /// This is the regression guard for a real defect, not a style preference. When the
+    /// override was a process-wide `static Mutex<..>`, `at_rest_wrappers_with_test_lpk`
+    /// above clearing it could race a concurrent identity test mid-`save_to`; that test's
+    /// wrap then fell through to the OS keyring, which a Linux CI container does not have,
+    /// and `save_to`'s availability fallback wrote the OpenPGP secret key to disk UNSEALED.
+    /// The failure looked like flake (~7 runs in 12, never locally, because Windows DPAPI
+    /// always answers) while actually reporting an unsealed private key.
+    ///
+    /// If someone makes this shared again, this test fails instead of the flake coming back.
+    #[cfg(feature = "keyring")]
+    #[test]
+    fn test_lpk_override_is_thread_local() {
+        __set_test_lpk(Some([9u8; 32]));
+        assert_eq!(
+            super::test_override::get(),
+            Some([9u8; 32]),
+            "the installing thread must see its own override"
+        );
+
+        let seen_elsewhere = std::thread::spawn(|| super::test_override::get())
+            .join()
+            .expect("probe thread panicked");
+        assert_eq!(
+            seen_elsewhere, None,
+            "another thread saw this thread's test LPK — the override is shared again, so one test can clear another's key mid-wrap and the secret key lands on disk unsealed"
+        );
+
+        // And the converse: a clear on another thread must not disturb ours.
+        std::thread::spawn(|| __set_test_lpk(None)).join().expect("probe thread panicked");
+        assert_eq!(
+            super::test_override::get(),
+            Some([9u8; 32]),
+            "another thread clearing the override wiped ours — this is the exact race"
+        );
 
         __set_test_lpk(None);
     }

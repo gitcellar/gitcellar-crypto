@@ -357,6 +357,97 @@ mod tests {
         assert_eq!(loaded.user_id(), original.user_id());
     }
 
+    /// The bytes `save_to` puts on disk must be the
+    /// AES-256-GCM seal, never the OpenPGP secret key itself.
+    ///
+    /// Red-first record (2026-09-08): with `save_to`'s wrap forced
+    /// to fail — the exact production path a missing OS keyring takes — the
+    /// three pre-existing tests in this module stayed green while
+    /// `secret.pgp` held the TSK in the clear, because they only compared
+    /// fingerprints across a save/load round-trip. This test reads the file
+    /// back raw and fails against that mutation.
+    ///
+    /// Uses the process-wide test LPK so the seal is deterministic without a
+    /// live keyring. The assertions are deliberately key-agnostic (the wrap
+    /// magic, and "the raw bytes are not a parseable certificate") so a
+    /// sibling test clearing the override mid-run cannot flip this one.
+    #[cfg(feature = "keyring")]
+    #[test]
+    fn test_save_to_writes_sealed_secret_key_not_plaintext() {
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path();
+        let identity = Identity::generate("sealed@example.com").unwrap();
+        identity.save_to(path).unwrap();
+
+        let raw = std::fs::read(path.join(SECRET_KEY_FILE)).unwrap();
+        assert!(
+            crate::keywrap::is_wrapped(&raw),
+            "secret.pgp must start with the at-rest wrap magic; it is {} bytes starting {:02x?}",
+            raw.len(),
+            &raw[..raw.len().min(8)]
+        );
+        assert!(
+            openpgp::Cert::from_bytes(&raw).is_err(),
+            "raw secret.pgp bytes parsed as an OpenPGP certificate — the secret key is on disk in the clear"
+        );
+
+        // The plaintext TSK must not appear anywhere inside the file either
+        // (a seal that prepended magic to plaintext would pass the two checks
+        // above).
+        use openpgp::serialize::Serialize;
+        let mut tsk_bytes = Vec::new();
+        identity.cert.as_tsk().serialize(&mut tsk_bytes).unwrap();
+        let probe = &tsk_bytes[..tsk_bytes.len().min(64)];
+        assert!(
+            !raw.windows(probe.len()).any(|w| w == probe),
+            "the leading {} bytes of the plaintext TSK are present verbatim in secret.pgp",
+            probe.len()
+        );
+
+        // public.pgp is public material and stays a plain certificate.
+        let pub_raw = std::fs::read(path.join(PUBLIC_KEY_FILE)).unwrap();
+        assert!(!crate::keywrap::is_wrapped(&pub_raw), "public.pgp must not be sealed");
+        assert!(openpgp::Cert::from_bytes(&pub_raw).is_ok(), "public.pgp must stay parseable");
+
+        // And the sealed file still round-trips through load_from.
+        let loaded = Identity::load_from(path).unwrap();
+        assert_eq!(loaded.fingerprint(), identity.fingerprint());
+    }
+
+    /// The documented migration: a pre-F5 plaintext `secret.pgp` still loads,
+    /// and the next `save_to` re-seals it. Reads the bytes back both times.
+    #[cfg(feature = "keyring")]
+    #[test]
+    fn test_legacy_plaintext_secret_key_loads_and_is_resealed_on_save() {
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
+        use openpgp::serialize::Serialize;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path).unwrap();
+
+        // Hand-write a legacy plaintext identity, bypassing save_to.
+        let identity = Identity::generate("legacy@example.com").unwrap();
+        let mut tsk_bytes = Vec::new();
+        identity.cert.as_tsk().serialize(&mut tsk_bytes).unwrap();
+        std::fs::write(path.join(SECRET_KEY_FILE), &tsk_bytes).unwrap();
+        let mut pub_bytes = Vec::new();
+        identity.cert.serialize(&mut pub_bytes).unwrap();
+        std::fs::write(path.join(PUBLIC_KEY_FILE), &pub_bytes).unwrap();
+        assert!(!crate::keywrap::is_wrapped(&std::fs::read(path.join(SECRET_KEY_FILE)).unwrap()));
+
+        let loaded = Identity::load_from(path).unwrap();
+        assert_eq!(loaded.fingerprint(), identity.fingerprint());
+
+        loaded.save_to(path).unwrap();
+        let raw = std::fs::read(path.join(SECRET_KEY_FILE)).unwrap();
+        assert!(crate::keywrap::is_wrapped(&raw), "re-save must seal a legacy plaintext secret.pgp");
+        assert!(openpgp::Cert::from_bytes(&raw).is_err());
+        assert_eq!(Identity::load_from(path).unwrap().fingerprint(), identity.fingerprint());
+    }
+
     #[test]
     fn test_load_nonexistent() {
         let temp_dir = TempDir::new().unwrap();

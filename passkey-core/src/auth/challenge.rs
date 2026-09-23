@@ -5,6 +5,68 @@
 
 use rand::Rng;
 
+use crate::error::PasskeyError;
+
+/// What an authentication-challenge signature is for.
+///
+/// The purpose's domain tag is part of the signed bytes (see
+/// [`challenge_signing_payload`]), so a signature made for one purpose never
+/// verifies as another, and never as any other object the same key signs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengePurpose {
+    /// Challenge-response sign-in of a registered machine.
+    Login,
+    /// Proof of possession of a key being registered with a new account.
+    RegistrationProof,
+}
+
+impl ChallengePurpose {
+    /// Versioned domain tag signed in front of the challenge.
+    pub fn domain(self) -> &'static str {
+        match self {
+            ChallengePurpose::Login => "gc-auth-login-v1",
+            ChallengePurpose::RegistrationProof => "gc-auth-registration-pop-v1",
+        }
+    }
+}
+
+/// True for exactly the shape [`generate_challenge`] produces: 64 lowercase hex
+/// characters. A client checks this before signing anything the server sent.
+pub fn is_well_formed_challenge(challenge: &str) -> bool {
+    challenge.len() == 64 && challenge.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The exact bytes an authentication-challenge signature covers:
+/// `lp(purpose.domain()) ‖ lp(challenge)`, where `lp(s)` is
+/// `<decimal byte length>:<s>\n` (the length-prefix encoding every signed
+/// canonical in GitCellar uses).
+///
+/// The challenge comes from the server, which is untrusted. Signing it raw
+/// would let a malicious server present *any* byte string (for example the
+/// canonical of a key grant) as a "challenge" and receive the user's signature
+/// over it. Two things prevent that here: the challenge must be a well-formed
+/// nonce, and the signed bytes open with an auth-only domain tag that no other
+/// signed object in the system starts with.
+///
+/// Returns [`PasskeyError::InvalidChallenge`] for anything that is not a
+/// well-formed nonce. Signer and verifier must both build the payload here.
+pub fn challenge_signing_payload(
+    purpose: ChallengePurpose,
+    challenge: &str,
+) -> crate::error::Result<Vec<u8>> {
+    if !is_well_formed_challenge(challenge) {
+        return Err(PasskeyError::InvalidChallenge);
+    }
+    let mut out = Vec::with_capacity(96);
+    for field in [purpose.domain(), challenge] {
+        out.extend_from_slice(field.len().to_string().as_bytes());
+        out.push(b':');
+        out.extend_from_slice(field.as_bytes());
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
 /// Generate a random challenge nonce
 ///
 /// Returns a 64-character hex string (32 bytes of entropy).
@@ -25,6 +87,8 @@ pub fn generate_challenge() -> String {
 /// Generate a challenge with timestamp
 ///
 /// Returns a challenge that includes a timestamp prefix for expiration checking.
+/// Not an authentication challenge: its `hex:hex` shape fails
+/// [`is_well_formed_challenge`], so clients refuse to sign it.
 /// Format: `{unix_timestamp_hex}:{random_hex}`
 ///
 /// # Example
@@ -87,6 +151,32 @@ pub fn is_challenge_valid(challenge: &str, max_age_secs: u64) -> Result<bool, &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn well_formed_challenge_accepts_only_generated_shape() {
+        assert!(is_well_formed_challenge(&generate_challenge()));
+        assert!(!is_well_formed_challenge(""));
+        assert!(!is_well_formed_challenge(&"a".repeat(63)));
+        assert!(!is_well_formed_challenge(&"a".repeat(65)));
+        assert!(!is_well_formed_challenge(&"A".repeat(64)));
+        assert!(!is_well_formed_challenge(&format!("{}g", "a".repeat(63))));
+        // A signed-object canonical presented as a "challenge" is refused.
+        assert!(!is_well_formed_challenge("11:gc-grant-v1\n9:alice/foo\n"));
+    }
+
+    #[test]
+    fn signing_payload_is_domain_framed_and_purpose_separated() {
+        let c = generate_challenge();
+        let login = challenge_signing_payload(ChallengePurpose::Login, &c).unwrap();
+        assert_eq!(login, format!("16:gc-auth-login-v1\n64:{c}\n").into_bytes());
+        let pop = challenge_signing_payload(ChallengePurpose::RegistrationProof, &c).unwrap();
+        assert_eq!(pop, format!("27:gc-auth-registration-pop-v1\n64:{c}\n").into_bytes());
+        assert_ne!(login, pop);
+        assert!(matches!(
+            challenge_signing_payload(ChallengePurpose::Login, "11:gc-grant-v1\n"),
+            Err(PasskeyError::InvalidChallenge)
+        ));
+    }
 
     #[test]
     fn test_generate_challenge_length() {

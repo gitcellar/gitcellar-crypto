@@ -41,13 +41,13 @@ gitcellar-crypto -----> vault-core
 
 | Purpose | Algorithm | Implementation |
 |---------|-----------|----------------|
-| Signing key | Ed25519 | Sequoia OpenPGP |
+| Signing key | Ed25519 | Sequoia OpenPGP. Every object the identity key signs opens with its own versioned domain tag, authentication challenges included, so a signature made for one purpose does not verify as another |
 | Encryption key | X25519 (ECDH) | Sequoia OpenPGP |
 | Chunk encryption (your repository's file contents) | XChaCha20-Poly1305 AEAD | `chacha20poly1305` crate — vault-core's `XChaChaChunkEngine`; 24-byte nonce, 16-byte Poly1305 tag |
-| Backup bundles, identity bundles, keys at rest | AES-256-GCM | `aes-gcm` crate, HKDF-SHA256-derived keys — this is not the chunk path |
+| Recovery-code identity backup; local key sealing (OS keyring) | AES-256-GCM | `aes-gcm` crate, HKDF-SHA256-derived keys — this is not the chunk path. The `.gckey` identity-transfer file is deliberately **not** encrypted: treat it like the private key it contains |
 | Content-key derivation | HKDF-SHA256 | `hkdf` crate — per-repo content key, domain-separated `info` string |
 | Passphrase key derivation | Argon2id | `argon2` crate (passphrase-derived contexts) |
-| Recovery phrases | BIP39 | `bip39` crate (24-word mnemonic, derives encryption keys) |
+| Recovery phrases | BIP39 | `bip39` crate (24-word mnemonic). The phrase derives the key that opens the encrypted identity backup and the multi-device master key; the identity key itself is generated at random, not derived from the phrase |
 | Content chunking | Gear-based FastCDC, per-repo keyed Gear table | vault-core (table derived via keyed BLAKE3) |
 | Chunk naming | HMAC-SHA256 (keyed) / SHA-256 (unkeyed) | `hmac` / `sha2` crates |
 | Hashing | SHA-256 | `sha2` crate |
@@ -58,11 +58,11 @@ When a user pushes code to their local GitCellar Forge:
 
 1. **Webhook fires** to the GitCellar Service
 2. **vault-core** splits the git bundle into variable-size chunks (~1 MB average) using content-defined chunking, with per-repo keyed boundaries
-3. **vault-core** seals each chunk with XChaCha20-Poly1305 under a per-repo content key derived via HKDF-SHA256. The chunk's identity — repository, chunk name, offset, size — is bound into the AEAD as associated data, so a stored chunk only opens under the identity it was sealed with
-4. Encrypted chunks are concatenated into larger **pack** blobs, so a stored object's size does not map to a single chunk, and the packs upload to S3-compatible object storage
-5. A stream manifest (chunk index) is encrypted and uploaded alongside
+3. **vault-core** seals each chunk with XChaCha20-Poly1305 under a per-repo content key derived via HKDF-SHA256. The chunk's identity — repository, chunk name and size — is bound into the AEAD as associated data, so a stored chunk only opens under the identity it was sealed with. (The stream offset is fixed at 0 so a deduplicated chunk stays valid at every position; order is enforced against the signed manifest instead.)
+4. Encrypted chunks are concatenated into **pack** blobs and uploaded to S3-compatible object storage. A pack holds the new chunks of one push, so packing hides per-chunk sizes within a large push, but the total size of every push is visible and a small push's pack reveals the size of what it added
+5. A stream manifest (chunk index) is encrypted, signed by the owner, and uploaded alongside
 
-The user's private key never leaves their machine, and the storage provider sees only encrypted blobs. This is zero-access encryption — GitCellar cannot decrypt your code.
+GitCellar only ever uploads the user's private key encrypted, in the optional recovery backup sealed under a key derived from the recovery phrase; a `.gckey` export the user makes themselves is unencrypted. The storage provider holds only ciphertext; it can observe object sizes, counts and timing. GitCellar's servers never hold a key that decrypts your code. This is zero-access encryption. One limit applies to shared repositories today: collaborators' public keys are served by GitCellar and are not yet checked against an independent public key log, so a compromised server could substitute a key when access is first granted.
 
 **What this covers:** your code — the file contents of your repositories. Repository *metadata* that you choose to publish to your Cloud profile — repository names, languages, commit counts, branches — is held server-side in plaintext and is not protected by the encryption described above.
 

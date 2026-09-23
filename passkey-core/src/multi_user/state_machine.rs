@@ -298,6 +298,22 @@ mod tests {
 
         let repaired = repair_state(&config).unwrap();
         assert!(matches!(repaired, IdentityState::Ready { username } if username == "alice"));
+
+        // Weak-test audit (2026-09-07): `repair_state` builds the
+        // `Ready` it returns locally, so the assertion above holds even when
+        // the active_user write landed nowhere -- measured 2026-09-08 with the
+        // `set_active_user` call removed: green. The repair is only real if a
+        // FRESH evaluation, reading the store back, agrees.
+        assert!(
+            matches!(evaluate_state(&config), IdentityState::Ready { username } if username == "alice"),
+            "re-evaluating from disk after repair must be Ready(alice); got {:?}",
+            evaluate_state(&config)
+        );
+        assert_eq!(
+            crate::multi_user::get_active_user(&config).as_deref(),
+            Some("alice"),
+            "the active_user record itself must name alice after repair"
+        );
     }
 
     #[test]
@@ -313,6 +329,19 @@ mod tests {
 
         let repaired = repair_state(&config).unwrap();
         assert!(matches!(repaired, IdentityState::Ready { username } if username == "alice"));
+
+        // Same as test_repair_single_user -- the store must agree, or the
+        // app re-enters ActiveUserMissing on every launch while this stays green.
+        assert!(
+            matches!(evaluate_state(&config), IdentityState::Ready { username } if username == "alice"),
+            "re-evaluating from disk after repair must be Ready(alice); got {:?}",
+            evaluate_state(&config)
+        );
+        assert_eq!(
+            crate::multi_user::get_active_user(&config).as_deref(),
+            Some("alice"),
+            "the active_user record must have been repointed from 'nonexistent' to alice"
+        );
     }
 
     #[test]

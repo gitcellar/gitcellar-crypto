@@ -107,6 +107,7 @@ impl From<gitcellar_identity::PasskeyError> for CryptoError {
             PasskeyError::InvalidSignature => CryptoError::Other(anyhow::anyhow!("Invalid signature")),
             PasskeyError::InvalidMachineId => CryptoError::Other(anyhow::anyhow!("Invalid machine ID")),
             PasskeyError::ChallengeExpired => CryptoError::Other(anyhow::anyhow!("Challenge expired")),
+            PasskeyError::InvalidChallenge => CryptoError::Other(anyhow::anyhow!("Challenge is not a well-formed nonce")),
             PasskeyError::InvalidToken => CryptoError::Other(anyhow::anyhow!("Invalid token")),
             PasskeyError::TokenExpired => CryptoError::Other(anyhow::anyhow!("Token expired")),
             PasskeyError::CredentialStore(msg) => CryptoError::Other(anyhow::anyhow!("Credential store: {}", msg)),

@@ -61,6 +61,10 @@ parse_deps = false
 include = []
 extra_bindings = []
 
-[parse.expand]
-crates = ["vault-core"]
-all_features = true
+# [parse.expand] was `crates = ["vault-core"], all_features = true`. That makes
+# cbindgen shell out to `cargo rustc -- -Zunpretty=expanded`, which only a
+# NIGHTLY toolchain accepts, so on a stable-only machine `--features ffi` failed
+# in build.rs before compiling a line — and the FFI tests (`ffi::tests`) could
+# never run: they are behind `#[cfg(feature = "ffi")]`, so a default `cargo
+# test` filters them out too. ffi.rs uses no macros that need expansion.
+# Removed 2026-09-08 (weak-test audit).

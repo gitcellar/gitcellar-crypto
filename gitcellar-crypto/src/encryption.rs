@@ -637,10 +637,34 @@ impl EncryptionEngine {
         Ok(decrypted_chunks)
     }
 
+    /// Sign a server-issued authentication challenge.
+    ///
+    /// This is the only correct way to answer a challenge. It refuses anything
+    /// that is not a well-formed nonce, and it signs the purpose-tagged payload
+    /// from [`gitcellar_identity::challenge_signing_payload`], never the raw
+    /// challenge. The server is untrusted, and the identity key also signs key
+    /// grants, audit entries and repo-owner bindings. A raw-signed "challenge"
+    /// could be any of those: a hostile server could serve a grant's canonical
+    /// bytes as the challenge and receive a valid grant signature.
+    pub fn sign_auth_challenge(
+        &self,
+        purpose: gitcellar_identity::ChallengePurpose,
+        challenge: &str,
+    ) -> Result<Vec<u8>> {
+        let payload = gitcellar_identity::challenge_signing_payload(purpose, challenge)?;
+        self.sign_data(&payload)
+    }
+
     /// Sign data (for protocol message authentication)
     ///
     /// Creates a detached OpenPGP signature over the provided data.
     /// For detached signatures, we write directly to the Signer (no LiteralWriter).
+    ///
+    /// **Never pass bytes a peer chose.** The same key signs grants, audit
+    /// entries, key assertions and manifests, so signing a peer-supplied string
+    /// hands that peer a signature any of those verifiers may accept. Build the
+    /// payload locally under its own domain tag; answer auth challenges with
+    /// [`Self::sign_auth_challenge`].
     pub fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>> {
         use openpgp::serialize::stream::{Signer, Message};
 

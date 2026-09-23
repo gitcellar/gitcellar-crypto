@@ -64,7 +64,11 @@ pub use gitcellar_identity::Identity;
 pub use gitcellar_identity::PasskeyError;
 pub use gitcellar_identity::PasskeyConfig;
 pub use gitcellar_identity::config as gitcellar_config;
-pub use gitcellar_identity::recovery::{RecoveryCode, generate_recovery_code, is_valid_phrase, find_invalid_words};
+// `RECOVERY_CODE_WORD_COUNT` is re-exported so callers that must AGREE with
+// `RecoveryCode::from_phrase` about the word count take the number off the
+// source rather than typing 24 with a "mirrors X" comment beside it — the
+// hand-copied-constant shape that has drifted before.
+pub use gitcellar_identity::recovery::{RecoveryCode, generate_recovery_code, is_valid_phrase, find_invalid_words, RECOVERY_CODE_WORD_COUNT};
 pub use gitcellar_identity::multi_user::{IdentityState, UserInfo};
 
 // Re-export path functions from gitcellar-identity
@@ -79,6 +83,13 @@ pub use gitcellar_identity::{
 // the Service drifted to a 64-bit truncation while every other tier widened,
 // and the Cloud then rejected every machine_id it claimed.
 pub use gitcellar_identity::{is_valid_gcm_machine_id, machine_id as derive_machine_id};
+
+// Authentication challenges: the signer (`EncryptionEngine::sign_auth_challenge`)
+// and every verifier build the signed bytes through `challenge_signing_payload`.
+pub use gitcellar_identity::{
+    challenge_signing_payload, generate_challenge, is_well_formed_challenge,
+    verify_detached_signature, ChallengePurpose,
+};
 
 // At-rest key wrap (F5 / DEC-LD-03) — re-exported so every consumer (desktop,
 // cli, test-helper, migration) opens sealed key files through one entry point.

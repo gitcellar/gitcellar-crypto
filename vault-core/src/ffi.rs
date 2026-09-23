@@ -576,6 +576,41 @@ mod tests {
             let decrypted_slice = slice::from_raw_parts((*decrypted).data, (*decrypted).len);
             assert_eq!(plaintext.to_vec(), decrypted_slice.to_vec());
 
+            // Weak-test audit (2026-09-07): the round-trip
+            // above is satisfied by an identity "cipher" -- measured 2026-09-08
+            // with vault_aes_encrypt/decrypt both returning their input: this
+            // test stayed green. The ciphertext must be DIFFERENT from the
+            // plaintext, carry exactly the AES-256-GCM nonce + tag overhead
+            // (12 + 16 bytes, encryption.rs AesEncryptionEngine::encrypt), and
+            // refuse to open once a byte is flipped (the GCM tag).
+            let encrypted_slice = slice::from_raw_parts((*encrypted).data, (*encrypted).len);
+            assert_ne!(
+                encrypted_slice, &plaintext[..],
+                "ciphertext equals plaintext -- the FFI encrypt is a no-op"
+            );
+            assert!(
+                !encrypted_slice.windows(plaintext.len()).any(|w| w == &plaintext[..]),
+                "plaintext appears verbatim inside the ciphertext"
+            );
+            assert_eq!(
+                encrypted_slice.len(),
+                plaintext.len() + 12 + 16,
+                "AES-256-GCM output must be plaintext + 12-byte nonce + 16-byte tag"
+            );
+
+            let mut tampered = encrypted_slice.to_vec();
+            let last = tampered.len() - 1;
+            tampered[last] ^= 0x01;
+            let rejected = vault_aes_decrypt(engine, tampered.as_ptr(), tampered.len());
+            assert!(
+                rejected.is_null(),
+                "a ciphertext with one flipped bit must NOT decrypt (GCM auth tag)"
+            );
+            let err = vault_last_error();
+            assert!(!err.is_null(), "a refused decrypt must set the last-error string");
+            let msg = std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned();
+            assert!(!msg.is_empty(), "last-error must carry the decrypt failure text");
+
             // Cleanup
             vault_buffer_free(decrypted);
             vault_buffer_free(encrypted);

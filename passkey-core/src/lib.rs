@@ -91,6 +91,7 @@ pub use recovery::{get_word_list, is_valid_word, get_word_suggestions, find_clos
 pub use recovery::RECOVERY_CODE_WORD_COUNT;
 
 pub use auth::{generate_challenge, generate_timestamped_challenge, is_challenge_valid};
+pub use auth::{ChallengePurpose, challenge_signing_payload, is_well_formed_challenge};
 pub use auth::{derive_machine_id, derive_machine_id_from_identity, derive_machine_id_from_cert};
 pub use auth::{verify_machine_id, is_valid_machine_id, is_valid_machine_id_format};
 pub use auth::{verify_detached_signature, verify_detached_signature_with_cert};

@@ -122,7 +122,11 @@ impl ChunkFormatVersion {
 /// version chooses to bind real positions (at the cost of dedup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkAad {
-    /// Repository identity (`owner/name`) the chunk belongs to.
+    /// Repository identity (`owner/name`) the chunk belongs to, as it was when
+    /// the chunk was sealed. The name is mutable: a caller that renames or
+    /// transfers a repository must re-seal its stored chunks under the new
+    /// name (open with the old AAD, seal with the new, same key and format
+    /// version), or they stop decrypting under it.
     pub repo_id: String,
     /// The chunk's manifest name — the keyed HMAC hex name for content chunks
     /// (`StreamChunkEntry.hash`), or a fixed object name for singleton repo

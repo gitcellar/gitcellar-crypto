@@ -1,5 +1,13 @@
 # passkey-core
 
+## Synopsis
+
+The identity library underneath GitCellar's no-password authentication: Ed25519/X25519 certificate generation and on-disk multi-user storage, challenge/signature verification, BIP39 24-word recovery codes and their HKDF derivation, stable machine IDs, at-rest key wrap, and the OS-keyring credential store.
+
+Encryption *using* that identity (`.gckey` transfer, identity backup) is `gitcellar-crypto`, reached through `gitcellar-identity`; per-chunk sealing is `vault-core`. "PassKey" here means this Ed25519 keypair, not the WebAuthn browser API, which GitCellar does not use.
+
+Authentication challenges are signed through `challenge_signing_payload`: the client refuses anything that is not a 64-hex nonce and signs it under a purpose tag (`gc-auth-login-v1`, `gc-auth-registration-pop-v1`), never raw. The server is untrusted, and the same key signs other objects.
+
 Cross-platform PassKey-native authentication library providing Ed25519 identity management, challenge-response authentication, and BIP39 recovery codes.
 
 ## Features

@@ -48,6 +48,10 @@ pub enum PasskeyError {
     #[error("Challenge expired")]
     ChallengeExpired,
 
+    /// Challenge is not a well-formed nonce (see `auth::is_well_formed_challenge`)
+    #[error("Challenge is not a well-formed nonce")]
+    InvalidChallenge,
+
     // JWT errors
     /// JWT token is invalid
     #[error("Invalid token")]

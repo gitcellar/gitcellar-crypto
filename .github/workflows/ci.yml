@@ -55,6 +55,11 @@ jobs:
         # six-hour job.
         timeout-minutes: 30
         run: cargo test --workspace ${{ runner.os == 'macOS' && '--no-default-features' || '' }}
+      - name: cargo test vault-core C interface (the crate's only unsafe code)
+        # The FFI and its tests are behind `--features ffi`, which the
+        # workspace run above does not enable.
+        timeout-minutes: 15
+        run: cargo test -p vault-core --features ffi
 
   msrv:
     name: minimum supported Rust (1.88)
@@ -69,6 +74,13 @@ jobs:
   audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
+    # audit-check reports each advisory as an issue and a check run; without
+    # these grants a scheduled red run fails silently ("Resource not accessible
+    # by integration").
+    permissions:
+      contents: read
+      issues: write
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
