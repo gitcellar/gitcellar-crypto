@@ -82,6 +82,28 @@
 //! - **Old-format grants fail closed.** A pre-I-1 payload (a bare TSK) is not
 //!   valid bundle JSON, so it is refused rather than silently imported
 //!   unverified. Pre-launch, that is a dev-data reset — by design.
+//!
+//! ## A delegated grant carries its delegation inside the signed bytes (KTD-6)
+//!
+//! A grant signed by someone other than the repo owner (an org admin, a
+//! collaborator re-sharing) is authorized by an owner-signed delegation. That
+//! delegation rides in the bundle as a [`GrantDelegation`], and the granter's
+//! signature covers it, under a separate domain tag:
+//!
+//! ```text
+//! lp("gc-grant-delegated-v1") ‖ <the six gc-grant-v1 fields, same order>
+//!     ‖ lp(del.repo_id) ‖ lp(del.delegate_account) ‖ lp(del.delegate_fingerprint)
+//!     ‖ lp(del.key_version) ‖ lp(del.timestamp_unix) ‖ lp(del.expires_at_unix)
+//!     ‖ lp(del.delegation_sig_b64)
+//! ```
+//!
+//! So a relay that strips the delegation (the canonical falls back to
+//! `gc-grant-v1`), swaps it, or edits any field of it breaks the grant signature.
+//! A bundle with no delegation signs and verifies exactly as before — the
+//! `gc-grant-v1` canonical is untouched. This module proves only that the
+//! granter authored the grant *with this delegation attached*; whether the
+//! delegation authorizes the granter is `authorize_repo_grant`'s decision
+//! (key-directory feature), fed by [`GrantBundle::repo_delegation`].
 
 use crate::canonical::lp_push;
 use crate::broadcast::verify_detached;
@@ -91,6 +113,11 @@ use crate::error::{CryptoError, Result};
 /// Versioned domain tag for the grant canonical. Bump ONLY with a coordinated
 /// granter+recipient change — old signatures stop verifying (by design).
 pub const GRANT_CANONICAL_VERSION: &str = "gc-grant-v1";
+
+/// Domain tag for the canonical of a grant that carries a delegation (KTD-6).
+/// Distinct from [`GRANT_CANONICAL_VERSION`], so a delegated grant's signature
+/// can never verify as a plain grant once its delegation is stripped.
+pub const DELEGATED_GRANT_CANONICAL_VERSION: &str = "gc-grant-delegated-v1";
 
 /// Normalize a fingerprint for canonical use: uppercase, whitespace stripped.
 ///
@@ -171,6 +198,59 @@ impl RepoKeyGrant {
         lp_push(&mut out, &self.timestamp_unix.to_string());
         out
     }
+
+    /// The bytes the granter signs for this grant with `delegation` attached.
+    /// `None` is exactly [`RepoKeyGrant::canonical`]; `Some` is the
+    /// `gc-grant-delegated-v1` canonical in the module docs, which binds every
+    /// field of the delegation and its owner signature.
+    pub fn canonical_with_delegation(&self, delegation: Option<&GrantDelegation>) -> Vec<u8> {
+        let Some(del) = delegation else {
+            return self.canonical();
+        };
+        let mut out = Vec::with_capacity(512);
+        lp_push(&mut out, DELEGATED_GRANT_CANONICAL_VERSION);
+        lp_push(&mut out, &self.repo_id);
+        lp_push(&mut out, &self.key_version.to_string());
+        lp_push(&mut out, &normalize_fingerprint(&self.recipient_fingerprint));
+        lp_push(&mut out, &normalize_fingerprint(&self.granter_fingerprint));
+        lp_push(&mut out, &self.key_material_b64);
+        lp_push(&mut out, &self.timestamp_unix.to_string());
+        lp_push(&mut out, &del.repo_id);
+        lp_push(&mut out, &del.delegate_account);
+        lp_push(&mut out, &del.delegate_fingerprint);
+        lp_push(&mut out, &del.key_version.to_string());
+        lp_push(&mut out, &del.timestamp_unix.to_string());
+        lp_push(&mut out, &del.expires_at_unix.to_string());
+        lp_push(&mut out, &del.delegation_sig_b64);
+        out
+    }
+}
+
+/// An owner-signed repo delegation as it travels inside a [`GrantBundle`]
+/// (KTD-6): the fields of `repo_owner::RepoDelegation` plus the owner's
+/// base64 detached signature over that delegation's canonical.
+///
+/// Carried verbatim (never re-normalized in the grant canonical), so what the
+/// granter signed is byte-for-byte what the recipient reads. Build one with
+/// `RepoDelegation::to_bundled` and read it back with
+/// [`GrantBundle::repo_delegation`] (both key-directory feature).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GrantDelegation {
+    /// The repository the delegation is for.
+    pub repo_id: String,
+    /// The delegate's account (lowercased), as in the delegation.
+    pub delegate_account: String,
+    /// The delegate's identity fingerprint (normalized) — must be the granter.
+    pub delegate_fingerprint: String,
+    /// The one repo-key version the delegation covers (KTD-7).
+    pub key_version: u32,
+    /// Delegation issuance time, unix seconds.
+    pub timestamp_unix: i64,
+    /// Delegation expiry, unix seconds.
+    pub expires_at_unix: i64,
+    /// Base64 detached signature over the delegation's canonical, by the repo
+    /// owner's identity key.
+    pub delegation_sig_b64: String,
 }
 
 /// Sign a [`RepoKeyGrant`] with the granting owner's identity (detached OpenPGP
@@ -200,14 +280,7 @@ pub fn verify_repo_key_grant(
     grant: &RepoKeyGrant,
     signature_b64: &str,
 ) -> Result<bool> {
-    use base64::Engine as _;
-    if signature_b64.is_empty() {
-        return Ok(false);
-    }
-    let sig = base64::engine::general_purpose::STANDARD
-        .decode(signature_b64)
-        .map_err(|e| CryptoError::OpenPgp(format!("grant sig is not valid base64: {e}")))?;
-    verify_detached(granter_cert_armored, &grant.canonical(), &sig)
+    verify_signed_bytes(granter_cert_armored, &grant.canonical(), signature_b64)
 }
 
 /// The plaintext that gets encrypted to the recipient — the granted key plus
@@ -228,8 +301,14 @@ pub struct GrantBundle {
     pub granter_fingerprint: String,
     /// Issuance time, unix seconds.
     pub timestamp_unix: i64,
-    /// Base64 detached signature over the [`RepoKeyGrant`] canonical.
+    /// Base64 detached signature over the [`RepoKeyGrant`] canonical — or, when
+    /// `delegation` is present, over [`RepoKeyGrant::canonical_with_delegation`].
     pub grant_sig_b64: String,
+    /// The owner-signed delegation authorizing a non-owner granter (KTD-6).
+    /// Absent for an owner-signed grant, and then omitted from the JSON, so an
+    /// owner's bundle is byte-identical to the pre-KTD-6 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<GrantDelegation>,
 }
 
 impl GrantBundle {
@@ -253,6 +332,26 @@ impl GrantBundle {
             self.key_material_b64.clone(),
             self.timestamp_unix,
         )
+    }
+
+    /// The delegation this bundle carries, if any. Its integrity is covered by
+    /// the grant signature, so read it only after [`verify_grant_bundle`] says
+    /// [`GrantVerifyOutcome::Valid`].
+    pub fn delegation(&self) -> Option<&GrantDelegation> {
+        self.delegation.as_ref()
+    }
+
+    /// The carried delegation as a `RepoDelegation` plus its owner signature,
+    /// ready for `authorize_repo_grant(.., delegation.as_ref().map(|(d, s)| (d,
+    /// s.as_str())), ..)`. `None` when the bundle carries no delegation.
+    #[cfg(feature = "key-directory")]
+    pub fn repo_delegation(&self) -> Option<(crate::key_directory::repo_owner::RepoDelegation, String)> {
+        self.delegation.as_ref().map(|d| {
+            (
+                crate::key_directory::repo_owner::RepoDelegation::from_bundled(d),
+                d.delegation_sig_b64.clone(),
+            )
+        })
     }
 
     /// Serialize for encryption to the recipient.
@@ -309,6 +408,44 @@ pub fn build_signed_grant_bundle(
         granter_fingerprint,
         timestamp_unix,
         grant_sig_b64,
+        delegation: None,
+    })
+}
+
+/// Build a signed [`GrantBundle`] that carries an owner-signed delegation
+/// (KTD-6) — the delegate-side composition point. The granter's signature
+/// covers the delegation too (see [`RepoKeyGrant::canonical_with_delegation`]).
+///
+/// This does not check that the delegation authorizes the granter; the
+/// recipient decides that with `authorize_repo_grant`, and the owner's signer
+/// refuses a non-conforming delegation before it exists.
+pub fn build_signed_delegated_grant_bundle(
+    granter_engine: &EncryptionEngine,
+    repo_id: &str,
+    key_version: i32,
+    recipient_fingerprint: &str,
+    key_material_b64: &str,
+    timestamp_unix: i64,
+    delegation: GrantDelegation,
+) -> Result<GrantBundle> {
+    use base64::Engine as _;
+    let granter_fingerprint = normalize_fingerprint(&granter_engine.fingerprint());
+    let grant = RepoKeyGrant::new(
+        repo_id,
+        key_version,
+        recipient_fingerprint,
+        &granter_fingerprint,
+        key_material_b64,
+        timestamp_unix,
+    );
+    let sig = granter_engine.sign_data(&grant.canonical_with_delegation(Some(&delegation)))?;
+    Ok(GrantBundle {
+        v: GRANT_CANONICAL_VERSION.to_string(),
+        key_material_b64: key_material_b64.to_string(),
+        granter_fingerprint,
+        timestamp_unix,
+        grant_sig_b64: base64::engine::general_purpose::STANDARD.encode(sig),
+        delegation: Some(delegation),
     })
 }
 
@@ -385,11 +522,32 @@ pub fn verify_grant_bundle(
     }
 
     let grant = bundle.to_grant(repo_id, key_version, recipient_fingerprint);
-    match verify_repo_key_grant(granter_cert_armored, &grant, &bundle.grant_sig_b64) {
+    let verified = match &bundle.delegation {
+        None => verify_repo_key_grant(granter_cert_armored, &grant, &bundle.grant_sig_b64),
+        Some(del) => verify_signed_bytes(
+            granter_cert_armored,
+            &grant.canonical_with_delegation(Some(del)),
+            &bundle.grant_sig_b64,
+        ),
+    };
+    match verified {
         Ok(true) => GrantVerifyOutcome::Valid,
         Ok(false) => GrantVerifyOutcome::SignatureInvalid,
         Err(e) => GrantVerifyOutcome::Malformed(e.to_string()),
     }
+}
+
+/// Shared fail-closed detached-signature check: empty is `Ok(false)`, bad
+/// base64 is `Err`.
+fn verify_signed_bytes(cert_armored: &str, signed: &[u8], signature_b64: &str) -> Result<bool> {
+    use base64::Engine as _;
+    if signature_b64.is_empty() {
+        return Ok(false);
+    }
+    let sig = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64)
+        .map_err(|e| CryptoError::OpenPgp(format!("grant sig is not valid base64: {e}")))?;
+    verify_detached(cert_armored, signed, &sig)
 }
 
 #[cfg(test)]

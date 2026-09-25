@@ -58,6 +58,9 @@ pub mod device_cert;
 pub mod revocation_cert;
 pub mod keystore;
 pub mod legacy_extract;
+// Key trust (KTR-5, DEC-KT-03): the phrase-derived master signs the statement that
+// lets an account replace its identity key.
+pub mod identity_succession;
 
 // Re-export identity types from gitcellar-identity (wraps passkey-core)
 pub use gitcellar_identity::Identity;
@@ -210,6 +213,10 @@ pub use keystore::{
 pub use legacy_extract::{
     armored_public_key, extract_ed25519_keypair, extract_ed25519_public_key,
     LegacyEd25519Keypair, LegacyExtractError,
+};
+pub use identity_succession::{
+    sign_identity_succession, verify_identity_succession, IdentitySuccession, SuccessionError,
+    IDENTITY_SUCCESSION_VERSION,
 };
 pub use broadcast::{
     action_url_allowed, verify_detached, BroadcastPayload, BroadcastTargeting, BroadcastTier,
