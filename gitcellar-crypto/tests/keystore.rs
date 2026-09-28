@@ -12,8 +12,32 @@ const TEST_PHRASE: &str = "abandon abandon abandon abandon abandon abandon aband
                            abandon abandon abandon abandon abandon abandon abandon abandon \
                            abandon abandon abandon abandon abandon abandon abandon art";
 
+/// Every test seals under a fixed, thread-local Local Protection Key. Since the
+/// keystore fails closed (2026-09-25), a host with no OS keyring -- the Linux CI
+/// container -- would otherwise refuse every `generate_device_keypair`. The
+/// override is per thread, and each test runs on its own thread, so installing it
+/// here cannot race a neighbour.
+#[cfg(feature = "keyring")]
+fn install_test_lpk() {
+    gitcellar_identity::keywrap::__set_test_lpk(Some([0x5au8; 32]));
+}
+
+#[cfg(feature = "keyring")]
 fn ks(dir: &TempDir) -> FileSystemKeystore {
+    install_test_lpk();
     FileSystemKeystore::new(dir.path().join("identity"))
+}
+
+/// A build without the keyring feature has no seal, so the real keystore refuses
+/// to generate a key at all (see `keystore_fail_closed.rs`). These tests are about
+/// everything else the keystore does, so they substitute a test-only sealer that
+/// stores the seed as-is -- the legacy plaintext form the read path still opens.
+#[cfg(not(feature = "keyring"))]
+fn ks(dir: &TempDir) -> FileSystemKeystore {
+    fn store_as_is(seed: &[u8; 32]) -> Result<Vec<u8>, KeystoreError> {
+        Ok(seed.to_vec())
+    }
+    FileSystemKeystore::with_sealer(dir.path().join("identity"), store_as_is)
 }
 
 #[test]
@@ -176,17 +200,15 @@ fn keystore_persists_across_recreated_instances() {
     verify_with_pubkey(&pubkey, b"signed across instances", &sig).unwrap();
 }
 
-// Probes the real OS keyring; only meaningful when the crate is built with it.
+// Only meaningful when the crate is built with the keyring feature.
 #[cfg(feature = "keyring")]
 #[test]
 fn device_seed_sealed_at_rest_and_round_trips() {
-    // F5 / AC-F5.1: when an OS keyring is available, the on-disk
-    // `device.key.bin` is AES-256-GCM ciphertext (carries the keywrap magic),
-    // NOT the 32 raw plaintext seed bytes. Where no keyring exists (some CI)
-    // the seal falls back to a plaintext write — but the read path round-trips
-    // either way. (No global test-LPK override here: this binary's other tests
-    // run concurrently against the real keyring, so we must not mutate the
-    // process-global LPK.)
+    // F5 / AC-F5.1: the on-disk `device.key.bin` is AES-256-GCM ciphertext
+    // (carries the keywrap magic), NOT the 32 raw plaintext seed bytes. This used
+    // to assert only when the host's real keyring answered, because a keyring
+    // failure fell back to a plaintext write; the keystore now fails closed, so
+    // under the test LPK `ks()` installs the seal is asserted unconditionally.
     let dir = TempDir::new().unwrap();
     let mut store = ks(&dir);
     let pubkey = store.generate_device_keypair().unwrap();
@@ -194,15 +216,12 @@ fn device_seed_sealed_at_rest_and_round_trips() {
     let priv_path = dir.path().join("identity").join(DEVICE_PRIVATE_FILENAME);
     let on_disk = std::fs::read(&priv_path).unwrap();
 
-    // Only assert sealing when the keyring is actually available on this host.
-    if gitcellar_identity::keywrap::wrap_at_rest(b"probe").is_ok() {
-        assert!(
-            gitcellar_identity::keywrap::is_wrapped(&on_disk),
-            "device.key.bin must be sealed at rest (AC-F5.1), got {} bytes",
-            on_disk.len()
-        );
-        assert_ne!(on_disk.len(), 32, "sealed seed must not be 32 raw bytes");
-    }
+    assert!(
+        gitcellar_identity::keywrap::is_wrapped(&on_disk),
+        "device.key.bin must be sealed at rest (AC-F5.1), got {} bytes",
+        on_disk.len()
+    );
+    assert_ne!(on_disk.len(), 32, "sealed seed must not be 32 raw bytes");
 
     // Round-trips back to a working signing key across a fresh instance.
     let store2 = ks(&dir);

@@ -53,7 +53,12 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_identity_exists_at() {
+        // No plaintext fallback any more: seal under a per-thread test
+        // key so this runs where there is no OS keyring (the CI container).
+        #[cfg(feature = "keyring")]
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         let temp_dir = TempDir::new().unwrap();
 
         // Initially doesn't exist
@@ -68,7 +73,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_delete_identity() {
+        // No plaintext fallback any more: seal under a per-thread test
+        // key so this runs where there is no OS keyring (the CI container).
+        #[cfg(feature = "keyring")]
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         let temp_dir = TempDir::new().unwrap();
 
         // Create identity

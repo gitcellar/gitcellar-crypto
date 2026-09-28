@@ -39,33 +39,32 @@ pub const DEVICE_PRIVATE_FILENAME: &str = "device.key.bin";
 /// Seal the 32-byte device seed for at-rest storage via the OS-keyring/DPAPI
 /// -backed Local Protection Key (F5 / AC-F5.1 / DEC-LD-03).
 ///
-/// Returns sealed bytes on success. If the OS keyring is unavailable (rare;
-/// headless/CI without Secret-Service) the raw seed is returned with a warning,
-/// preserving availability — the read path's [`open_device_seed_at_rest`]
-/// transparently accepts both forms. Shared so the desktop migration path and
-/// other writers seal identically.
-pub fn seal_device_seed_at_rest(seed: &[u8; 32]) -> Vec<u8> {
+/// **Fails closed.** If the OS keyring is unavailable (headless/CI without
+/// Secret-Service), or the crate was built without the `keyring` feature, this
+/// returns [`KeystoreError::Unavailable`] and nothing is written: a device seed
+/// never reaches disk as plaintext. Until 2026-09-25 it returned the raw seed
+/// with a warning "to preserve availability", so a keyring failure silently
+/// downgraded the at-rest seal to filesystem permissions.
+/// The read path's [`open_device_seed_at_rest`] still accepts a legacy (pre-F5)
+/// plaintext seed, so existing devices keep loading.
+pub fn try_seal_device_seed_at_rest(seed: &[u8; 32]) -> Result<Vec<u8>, KeystoreError> {
     #[cfg(feature = "keyring")]
     {
-        match gitcellar_identity::keywrap::wrap_at_rest(seed) {
-            Ok(sealed) => sealed,
-            Err(e) => {
-                tracing::warn!(
-                    "At-rest wrap unavailable for device seed ({}); writing unsealed. \
-                     Key material protected by filesystem permissions only.",
-                    e
-                );
-                seed.to_vec()
-            }
-        }
+        gitcellar_identity::keywrap::wrap_at_rest(seed).map_err(|e| {
+            tracing::error!(
+                "At-rest wrap unavailable for device seed ({}); refusing to write it unsealed.",
+                e
+            );
+            KeystoreError::Unavailable
+        })
     }
     #[cfg(not(feature = "keyring"))]
     {
-        tracing::warn!(
-            "Built without the keyring feature; writing device seed unsealed. \
-             Key material protected by filesystem permissions only."
+        let _ = seed;
+        tracing::error!(
+            "Built without the keyring feature; refusing to write a device seed unsealed."
         );
-        seed.to_vec()
+        Err(KeystoreError::Unavailable)
     }
 }
 
@@ -124,7 +123,7 @@ pub const MASTER_PUBLIC_FILENAME: &str = "master.pub.bin";
 /// Errors that can occur while interacting with a keystore backend.
 #[derive(Debug, Error)]
 pub enum KeystoreError {
-    #[error("keystore backend not available")]
+    #[error("keystore backend not available (no OS keyring to seal key material at rest)")]
     Unavailable,
 
     #[error("device key not initialized — call generate_device_keypair first")]
@@ -207,16 +206,32 @@ pub struct FileSystemKeystore {
     /// that hit `export_pubkey` repeatedly). Optional so we can defer
     /// disk I/O until needed; `None` means "not yet loaded or generated".
     cached_pubkey: Option<[u8; 32]>,
+
+    /// Seals the device seed before it is written. Always
+    /// [`try_seal_device_seed_at_rest`] outside tests; [`Self::with_sealer`]
+    /// swaps it so the fail-closed path can be driven on a host whose keyring
+    /// always answers (Windows DPAPI).
+    sealer: SeedSealer,
 }
+
+/// Signature of the function that seals a device seed for at-rest storage.
+pub type SeedSealer = fn(&[u8; 32]) -> Result<Vec<u8>, KeystoreError>;
 
 impl FileSystemKeystore {
     /// Create a new keystore backend rooted at `identity_dir`.
     /// Does **not** create the directory; call
     /// [`Self::ensure_dir`] before reading or writing.
     pub fn new(identity_dir: impl Into<PathBuf>) -> Self {
+        Self::with_sealer(identity_dir, try_seal_device_seed_at_rest)
+    }
+
+    /// Like [`Self::new`], with the at-rest sealer supplied by the caller. For
+    /// tests that must make the seal fail on a host where the OS keyring works.
+    pub fn with_sealer(identity_dir: impl Into<PathBuf>, sealer: SeedSealer) -> Self {
         Self {
             identity_dir: identity_dir.into(),
             cached_pubkey: None,
+            sealer,
         }
     }
 
@@ -305,16 +320,19 @@ impl KeystoreBackend for FileSystemKeystore {
 
         // F5 (AC-F5.1/F5.4, DEC-LD-03): seal the 32-byte private seed with the
         // OS-keyring/DPAPI-backed Local Protection Key before it touches disk.
-        // The on-disk `device.key.bin` is no longer 32 raw plaintext bytes; an
+        // The on-disk `device.key.bin` is never 32 raw plaintext bytes; an
         // infostealer reading it off disk gets AES-256-GCM ciphertext, closing
-        // the Windows inherited-ACL gap. Falls back to a plaintext write +
-        // warning only where no OS keyring exists (preserves availability).
-        // `seal_device_seed_at_rest` falls back to returning the RAW seed when no
-        // OS keyring exists, so the buffer we hand to `write_atomic` may itself be
-        // key material — carry it in `Zeroizing`.
-        let secret_to_write: Zeroizing<Vec<u8>> =
-            Zeroizing::new(seal_device_seed_at_rest(&secret_bytes));
-        self.write_atomic(&self.private_path(), &secret_to_write)?;
+        // the Windows inherited-ACL gap. With no OS keyring the seal fails and
+        // so does this call, before anything is written (fail closed).
+        let sealed = match (self.sealer)(&secret_bytes) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                drop(signing_key);
+                secret_bytes.zeroize();
+                return Err(e);
+            }
+        };
+        self.write_atomic(&self.private_path(), &sealed)?;
         self.write_atomic(&self.public_path(), &pubkey)?;
         // Drop the in-memory copies; SigningKey is ZeroizeOnDrop, and the local
         // `secret_bytes` is a stack copy.

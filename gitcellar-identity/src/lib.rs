@@ -273,7 +273,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_identity_workflow() {
+        // Saving seals the secret key; a per-thread test key lets that run where
+        // there is no OS keyring (a CI container).
+        #[cfg(feature = "keyring")]
+        passkey_core::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         // This test uses a temp directory to avoid affecting real config
         let temp_dir = TempDir::new().unwrap();
         let cfg = PasskeyConfig::gitcellar()

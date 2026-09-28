@@ -147,8 +147,18 @@ store.clear_all()?;
 
 ## Features
 
-- `keyring` (default) - OS keyring integration
+- `keyring` (default) - OS keyring integration. **Saving an identity requires it.** The secret key is always sealed under the Local Protection Key, and there is no plaintext write. A build without `keyring`, or a seal that fails, refuses the save (`Identity::save_to`, `seal_secret_key`).
 - `jwt` (default) - JWT token support
+
+### The Local Protection Key is never silently re-minted
+
+`keywrap::resolve_lpk` sets the policy, and `tests/at_rest_fail_closed.rs` pins it:
+- **Opening sealed data never mints.**
+- **Sealing mints only on an install that never minted one.** The record of that is the `lpk-v1.minted` marker in the identity root.
+- **A lost LPK is an `LPK_MISSING` error.**
+- **The only way past that error is to call `remint_local_protection_key`,** which the Desktop does only when it restores an identity from its recovery phrase.
+
+Tests that save an identity where there is no OS keyring install a per-thread key with `keywrap::__set_test_lpk`.
 - `ffi` - C-compatible FFI exports
 
 ```toml

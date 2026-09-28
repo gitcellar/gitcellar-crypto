@@ -34,15 +34,32 @@
 //! `.key`→`.gckey` auto-migration: an existing identity on disk keeps working,
 //! and the next write re-seals it. No flag-day, no migration script.
 //!
-//! ## Availability fallback
+//! ## No plaintext fallback
 //!
 //! If the OS keyring is unavailable (some headless Linux/CI environments with no
-//! Secret-Service daemon), [`wrap_at_rest`] returns an error and callers fall
-//! back to a plaintext write with a warning — preserving availability rather
-//! than bricking onboarding. On the primary platform (Windows desktop) DPAPI /
-//! Credential Manager is always present for an interactive user, so the wrap
-//! always engages there. The pure [`wrap_with_key`] / [`unwrap_with_key`]
-//! primitives never touch the keyring and are fully deterministic for testing.
+//! Secret-Service daemon), [`wrap_at_rest`] returns an error, and since
+//! 2026-09-25 the identity writer refuses rather than writing the key
+//! unsealed. A test that needs a sealed write without a keyring
+//! installs a per-thread test key with [`__set_test_lpk`]. The pure
+//! [`wrap_with_key`] / [`unwrap_with_key`] primitives never touch the keyring
+//! and are fully deterministic for testing.
+//!
+//! ## A missing LPK is an error, never a silent re-mint
+//!
+//! The LPK used to be minted whenever the keyring had no entry. That is right
+//! exactly once — the first run for this OS user — and wrong every other time:
+//! after a credential-store wipe or profile reset, a fresh key silently
+//! replaced the lost one, every file sealed under the old key became
+//! unreadable, and nothing said so. Now ([`resolve_lpk`]):
+//!
+//! - **opening** sealed data never mints: the sealed data proves an LPK
+//!   existed, so its absence is reported ([`LPK_MISSING_MARKER`] in the error);
+//! - **sealing** mints only when this install has never minted one, which a
+//!   marker file ([`lpk_minted_marker_path`], in the identity root, removed with
+//!   it on uninstall) records; otherwise it is the same error;
+//! - a deliberate re-mint — restoring an identity from the recovery phrase —
+//!   goes through [`remint_local_protection_key`], which says loudly what it
+//!   costs.
 
 use crate::error::{PasskeyError, Result};
 use aes_gcm::{
@@ -72,6 +89,126 @@ pub const KEYWRAP_SERVICE: &str = "gitcellar";
 /// Public for the same reason as [`KEYWRAP_SERVICE`] — it is swept by name on
 /// the destructive-uninstall path, and a second copy of the name is a defect.
 pub const LPK_ENTRY: &str = "at-rest-protection-key-v1";
+
+/// Token carried in every "the LPK is missing" error, so a caller can tell that
+/// case from a keyring that is merely unavailable without a new error variant.
+pub const LPK_MISSING_MARKER: &str = "LPK_MISSING";
+
+/// File name of the "an LPK has been minted for this install" marker.
+pub const LPK_MINTED_MARKER_FILE: &str = "lpk-v1.minted";
+
+/// Where the minted marker lives: the GitCellar identity root, next to the
+/// sealed files it vouches for, so the destructive uninstall that sweeps the
+/// LPK also removes the marker with the identity root.
+pub fn lpk_minted_marker_path() -> std::path::PathBuf {
+    crate::paths::PasskeyConfig::gitcellar()
+        .config_dir()
+        .join(LPK_MINTED_MARKER_FILE)
+}
+
+/// What a caller of [`resolve_lpk`] is allowed to do when the keyring has no LPK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpkMode {
+    /// Opening sealed data: never mint.
+    Open,
+    /// Sealing: mint only if this install has never minted one.
+    Seal,
+    /// Deliberate re-mint after a known loss (identity restore from phrase).
+    Remint,
+}
+
+/// The OS-keyring slot holding the LPK, abstracted so the mint policy is
+/// testable without a real credential store.
+pub trait LpkStore {
+    /// `Ok(None)` when there is no entry; `Err` when the store itself failed.
+    fn get(&self) -> std::result::Result<Option<String>, String>;
+    fn set(&self, b64: &str) -> std::result::Result<(), String>;
+}
+
+/// Resolve the LPK from `store` under `mode`, using `marker` as the record that
+/// one was minted for this install. See the module docs for the policy.
+pub fn resolve_lpk(
+    store: &dyn LpkStore,
+    marker: &std::path::Path,
+    mode: LpkMode,
+) -> Result<[u8; 32]> {
+    let decode = |b64: String| -> Result<[u8; 32]> {
+        let bytes = B64
+            .decode(b64.trim())
+            .map_err(|e| PasskeyError::CredentialStore(format!("LPK decode failed: {e}")))?;
+        bytes
+            .try_into()
+            .map_err(|_| PasskeyError::CredentialStore("LPK is not 32 bytes".to_string()))
+    };
+
+    match store
+        .get()
+        .map_err(|e| PasskeyError::CredentialStore(format!("LPK retrieval failed: {e}")))?
+    {
+        Some(b64) => {
+            let key = decode(b64)?;
+            // Backfill: an install whose LPK predates the marker gets one now,
+            // so a later loss of that LPK is caught rather than re-minted over.
+            if !marker.exists() {
+                write_minted_marker(marker);
+            }
+            Ok(key)
+        }
+        None => {
+            match mode {
+                LpkMode::Open => {
+                    return Err(PasskeyError::CredentialStore(format!(
+                        "{LPK_MISSING_MARKER}: the Local Protection Key is missing from the OS \
+                         credential store, so data sealed under it cannot be opened. It was not \
+                         re-created: a new key cannot open what the lost one sealed."
+                    )))
+                }
+                LpkMode::Seal if marker.exists() => {
+                    return Err(PasskeyError::CredentialStore(format!(
+                        "{LPK_MISSING_MARKER}: the Local Protection Key minted for this install \
+                         ({}) is missing from the OS credential store. Refusing to mint a \
+                         replacement silently — everything sealed under the lost key would become \
+                         unreadable without notice. Restore the identity from its recovery phrase.",
+                        marker.display()
+                    )))
+                }
+                LpkMode::Seal | LpkMode::Remint => {}
+            }
+            if mode == LpkMode::Remint {
+                tracing::warn!(
+                    "Re-minting the at-rest Local Protection Key after a known loss: anything \
+                     sealed under the previous key on this machine stays unreadable"
+                );
+            }
+            let mut key = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut key);
+            store
+                .set(&B64.encode(key))
+                .map_err(|e| PasskeyError::CredentialStore(format!("LPK persist failed: {e}")))?;
+            // Cross-process convergence: re-read and adopt whatever actually
+            // persisted. If another process won the mint race, we take theirs.
+            let key = match store.get() {
+                Ok(Some(b64)) => decode(b64)?,
+                _ => key,
+            };
+            write_minted_marker(marker);
+            tracing::info!("Minted a new at-rest Local Protection Key in the OS keyring");
+            Ok(key)
+        }
+    }
+}
+
+/// Record that an LPK was minted. Best-effort: a marker that cannot be written
+/// only weakens the re-mint guard for this install, while failing the mint
+/// after the key is already in the keyring would strand it.
+fn write_minted_marker(marker: &std::path::Path) {
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(marker, b"an at-rest Local Protection Key was minted for this install\n") {
+        tracing::warn!("Could not record the LPK minted marker at {:?}: {}", marker, e);
+    }
+}
 
 /// Whether `data` carries the at-rest wrap magic header.
 ///
@@ -132,12 +269,13 @@ pub fn unwrap_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 /// Fetch (or first-time create) the per-OS-user Local Protection Key from the
-/// OS keyring.
+/// OS keyring, for SEALING ([`LpkMode::Seal`]).
 ///
 /// Idempotent and stable: the first call resolves the key (reading the keyring,
-/// or minting + persisting one if absent) and caches it **process-locally**, so
-/// every later call in this process returns the identical key. Errors with
-/// [`PasskeyError::CredentialStore`] if the OS keyring is unavailable.
+/// or minting + persisting one if this install never minted one) and caches it
+/// **process-locally**, so every later call in this process returns the
+/// identical key. Errors with [`PasskeyError::CredentialStore`] if the OS
+/// keyring is unavailable, or if the LPK this install minted has gone missing.
 ///
 /// ## Concurrency
 ///
@@ -149,63 +287,81 @@ pub fn unwrap_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 /// value actually persisted, so independent processes converge on one key.
 #[cfg(feature = "keyring")]
 pub fn local_protection_key() -> Result<Zeroizing<[u8; 32]>> {
+    cached_lpk(LpkMode::Seal)
+}
+
+/// Process-local LPK cache shared by every mode.
+#[cfg(feature = "keyring")]
+fn lpk_cache() -> &'static std::sync::Mutex<Option<[u8; 32]>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(feature = "keyring")]
+fn cached_lpk(mode: LpkMode) -> Result<Zeroizing<[u8; 32]>> {
     // The test override always wins and is never cached, so tests can toggle it
     // between cases.
     if let Some(test_key) = test_override::get() {
         return Ok(Zeroizing::new(test_key));
     }
 
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
-    let mut guard = CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    let mut guard = lpk_cache().lock().unwrap();
     if let Some(cached) = *guard {
         return Ok(Zeroizing::new(cached));
     }
 
-    let key = resolve_lpk_from_keyring()?;
+    let key = resolve_lpk(&KeyringLpkStore::new()?, &lpk_minted_marker_path(), mode)?;
     *guard = Some(key);
     Ok(Zeroizing::new(key))
 }
 
-/// Read-or-mint the LPK from the OS keyring (uncached). See
-/// [`local_protection_key`] for the caching/concurrency contract.
+/// Deliberately replace a lost LPK — the recovery-phrase restore path.
+///
+/// A no-op when the LPK is present. When it is missing, mints a new one even
+/// though this install minted one before, and says so: whatever was sealed under
+/// the lost key on this machine stays unreadable. Never call this to get past an
+/// [`LPK_MISSING_MARKER`] error on any other path.
 #[cfg(feature = "keyring")]
-fn resolve_lpk_from_keyring() -> Result<[u8; 32]> {
-    let entry = keyring::Entry::new(KEYWRAP_SERVICE, LPK_ENTRY)
-        .map_err(|e| PasskeyError::CredentialStore(format!("LPK entry init failed: {e}")))?;
+pub fn remint_local_protection_key() -> Result<()> {
+    if test_override::get().is_some() {
+        return Ok(());
+    }
+    let mut guard = lpk_cache().lock().unwrap();
+    let key = resolve_lpk(
+        &KeyringLpkStore::new()?,
+        &lpk_minted_marker_path(),
+        LpkMode::Remint,
+    )?;
+    *guard = Some(key);
+    Ok(())
+}
 
-    let decode = |b64: String| -> Result<[u8; 32]> {
-        let bytes = B64
-            .decode(b64.trim())
-            .map_err(|e| PasskeyError::CredentialStore(format!("LPK decode failed: {e}")))?;
-        bytes
-            .try_into()
-            .map_err(|_| PasskeyError::CredentialStore("LPK is not 32 bytes".to_string()))
-    };
+/// The real OS-keyring slot ([`KEYWRAP_SERVICE`] / [`LPK_ENTRY`]).
+#[cfg(feature = "keyring")]
+struct KeyringLpkStore(keyring::Entry);
 
-    match entry.get_password() {
-        Ok(b64) => decode(b64),
-        Err(keyring::Error::NoEntry) => {
-            // First run on this machine/user: mint + persist a fresh LPK.
-            let mut key = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut key);
-            entry
-                .set_password(&B64.encode(key))
-                .map_err(|e| PasskeyError::CredentialStore(format!("LPK persist failed: {e}")))?;
-            // Cross-process convergence: re-read and adopt whatever actually
-            // persisted. If another process won the mint race, we take theirs;
-            // a seal made later in THIS process then uses the converged key.
-            match entry.get_password() {
-                Ok(b64) => decode(b64),
-                Err(_) => {
-                    tracing::info!("Minted a new at-rest Local Protection Key in the OS keyring");
-                    Ok(key)
-                }
-            }
+#[cfg(feature = "keyring")]
+impl KeyringLpkStore {
+    fn new() -> Result<Self> {
+        keyring::Entry::new(KEYWRAP_SERVICE, LPK_ENTRY)
+            .map(Self)
+            .map_err(|e| PasskeyError::CredentialStore(format!("LPK entry init failed: {e}")))
+    }
+}
+
+#[cfg(feature = "keyring")]
+impl LpkStore for KeyringLpkStore {
+    fn get(&self) -> std::result::Result<Option<String>, String> {
+        match self.0.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
         }
-        Err(e) => Err(PasskeyError::CredentialStore(format!(
-            "LPK retrieval failed: {e}"
-        ))),
+    }
+
+    fn set(&self, b64: &str) -> std::result::Result<(), String> {
+        self.0.set_password(b64).map_err(|e| e.to_string())
     }
 }
 
@@ -223,8 +379,9 @@ pub fn local_protection_secret() -> Result<String> {
 
 /// Seal `plaintext` for at-rest storage under the OS-keyring-backed LPK.
 ///
-/// Returns an error if the keyring is unavailable; callers writing key files
-/// should fall back to a plaintext write + warning to preserve availability.
+/// Returns an error if the keyring is unavailable or the LPK this install
+/// minted is missing. Callers writing key files must refuse the write rather
+/// than fall back to plaintext.
 #[cfg(feature = "keyring")]
 pub fn wrap_at_rest(plaintext: &[u8]) -> Result<Vec<u8>> {
     let key = local_protection_key()?;
@@ -234,13 +391,15 @@ pub fn wrap_at_rest(plaintext: &[u8]) -> Result<Vec<u8>> {
 /// Open an at-rest payload, transparently passing through legacy plaintext.
 ///
 /// If `data` lacks the wrap magic it is returned unchanged (a pre-F5 plaintext
-/// file). Otherwise it is opened under the OS-keyring-backed LPK.
+/// file). Otherwise it is opened under the OS-keyring-backed LPK, which is
+/// never minted on this path: sealed data proves an LPK existed, so a missing
+/// one is an [`LPK_MISSING_MARKER`] error.
 #[cfg(feature = "keyring")]
 pub fn unwrap_at_rest(data: &[u8]) -> Result<Vec<u8>> {
     if !is_wrapped(data) {
         return Ok(data.to_vec());
     }
-    let key = local_protection_key()?;
+    let key = cached_lpk(LpkMode::Open)?;
     unwrap_with_key(data, &key)
 }
 
@@ -258,11 +417,12 @@ pub fn unwrap_at_rest(data: &[u8]) -> Result<Vec<u8>> {
 ///
 /// That was not a flake with a cosmetic outcome. With the override gone, `wrap_at_rest`
 /// falls through to the real OS keyring; in a Linux CI container there is no Secret-Service,
-/// so it fails, and `save_to`'s DELIBERATE availability fallback writes the secret key
-/// **unsealed** with a warning. The victim test then reads `secret.pgp` back, finds no wrap
-/// magic, and fails — correctly. It was reporting a real unsealed write caused by a
-/// neighbouring test, which is why it failed ~7 runs in 12 in CI and never once locally,
-/// where Windows DPAPI always answers and the fallback never fires.
+/// so it fails. At the time `save_to` then fell back to writing the secret key **unsealed**
+/// with a warning (that fallback has since been removed: a failed seal now fails the save).
+/// The victim test read `secret.pgp` back, found no wrap magic, and failed — correctly. It
+/// was reporting a real unsealed write caused by a neighbouring test, which is why it failed
+/// ~7 runs in 12 in CI and never once locally, where Windows DPAPI always answers and the
+/// fallback never fired.
 ///
 /// A security test that is wrong half the time is one people learn to scroll past, so the
 /// cure has to remove the race rather than mute it. Thread-local does that by construction:

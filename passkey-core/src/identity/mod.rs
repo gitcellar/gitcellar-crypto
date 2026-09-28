@@ -170,11 +170,18 @@ impl Identity {
     /// # Arguments
     /// * `path` - Directory to save secret.pgp and public.pgp
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        use openpgp::serialize::Serialize;
+        self.save_to_with_sealer(path, seal_secret_key)
+    }
 
-        // Create directory if it doesn't exist
-        std::fs::create_dir_all(path)
-            .map_err(|e| PasskeyError::KeySave(format!("Failed to create directory {:?}: {}", path, e)))?;
+    /// [`Self::save_to`] with the at-rest sealer supplied by the caller — the
+    /// seam that lets a test prove a failed seal writes nothing. Production
+    /// always goes through `save_to`, i.e. [`seal_secret_key`].
+    pub fn save_to_with_sealer(
+        &self,
+        path: &Path,
+        seal: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        use openpgp::serialize::Serialize;
 
         let secret_path = path.join(SECRET_KEY_FILE);
         let public_path = path.join(PUBLIC_KEY_FILE);
@@ -188,29 +195,15 @@ impl Identity {
         // F5 (AC-F5.4, DEC-LD-03): seal the secret key with the OS-keyring/DPAPI
         // -backed Local Protection Key. The on-disk bytes become AES-256-GCM
         // ciphertext, so an infostealer reading the file gets nothing usable —
-        // protection no longer relies on the inherited ACL alone. If the OS
-        // keyring is unavailable (rare; headless/CI without Secret-Service), fall
-        // back to a plaintext write + warning to preserve availability.
-        let secret_to_write: Vec<u8> = {
-            #[cfg(feature = "keyring")]
-            {
-                match crate::keywrap::wrap_at_rest(&tsk_bytes) {
-                    Ok(sealed) => sealed,
-                    Err(e) => {
-                        tracing::warn!(
-                            "At-rest wrap unavailable for secret key ({}); writing unsealed. \
-                             Key material protected by filesystem permissions only.",
-                            e
-                        );
-                        tsk_bytes
-                    }
-                }
-            }
-            #[cfg(not(feature = "keyring"))]
-            {
-                tsk_bytes
-            }
-        };
+        // protection no longer relies on the inherited ACL alone. If the seal
+        // cannot be made, NOTHING is written — not even the directory. Until
+        // 2026-09-25 this fell back to a plaintext write with a warning nobody
+        // read.
+        let secret_to_write = seal(&tsk_bytes)?;
+
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(path)
+            .map_err(|e| PasskeyError::KeySave(format!("Failed to create directory {:?}: {}", path, e)))?;
 
         debug!("Saving secret key to: {:?}", secret_path);
         std::fs::write(&secret_path, &secret_to_write)
@@ -312,6 +305,30 @@ impl std::fmt::Debug for Identity {
     }
 }
 
+/// Seal a serialized secret key for disk, or refuse. There is no plaintext
+/// path: without the `keyring` feature there is no Local Protection Key to seal
+/// under, so the write is refused too.
+pub fn seal_secret_key(tsk_bytes: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(feature = "keyring")]
+    {
+        crate::keywrap::wrap_at_rest(tsk_bytes).map_err(|e| {
+            PasskeyError::KeySave(format!(
+                "refusing to write the secret key unsealed: the at-rest seal could not be made \
+                 ({e}). Nothing was written."
+            ))
+        })
+    }
+    #[cfg(not(feature = "keyring"))]
+    {
+        let _ = tsk_bytes;
+        Err(PasskeyError::KeySave(
+            "refusing to write the secret key unsealed: passkey-core was built without the \
+             `keyring` feature, so there is no Local Protection Key to seal it under."
+                .to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,7 +356,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_save_and_load() {
+        // No plaintext fallback any more: seal under a per-thread test
+        // key so this runs where there is no OS keyring (the CI container).
+        #[cfg(feature = "keyring")]
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path();
 
@@ -456,7 +478,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_with_config() {
+        // No plaintext fallback any more: seal under a per-thread test
+        // key so this runs where there is no OS keyring (the CI container).
+        #[cfg(feature = "keyring")]
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         let temp_dir = TempDir::new().unwrap();
         let config = PasskeyConfig::new("test")
             .with_config_dir(temp_dir.path().to_path_buf());

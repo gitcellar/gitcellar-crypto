@@ -202,6 +202,10 @@ mod tests {
     }
 
     fn create_user_with_identity(config: &PasskeyConfig, username: &str) {
+        // No plaintext fallback any more: seal under a per-thread test
+        // key so this runs where there is no OS keyring (the CI container).
+        #[cfg(feature = "keyring")]
+        crate::keywrap::__set_test_lpk(Some([0x42u8; 32]));
         create_user(config, username).unwrap();
         let identity = Identity::generate(&format!("{}@example.com", username)).unwrap();
         identity.save_for_user(config, username).unwrap();
@@ -219,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_single_user_ready() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -234,6 +239,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_multi_user_ready() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -252,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_needs_user_selection() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -270,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_active_user_missing() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -286,6 +294,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_repair_single_user() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -317,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_repair_active_missing() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -345,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_available_users() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -360,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "keyring"), ignore = "saving an identity requires the keyring feature: there is no plaintext write")]
     fn test_users_without_identity_ignored() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
