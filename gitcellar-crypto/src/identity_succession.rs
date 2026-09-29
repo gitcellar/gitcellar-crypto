@@ -180,6 +180,34 @@ pub fn verify_identity_succession(
     })
 }
 
+/// Domain tag of the first-key evidence canonical.
+pub const FIRST_KEY_EVIDENCE_VERSION: &str = "gc-kt-first-key-evidence-v1";
+
+/// The bytes the key directory signs over an account's first-key evidence:
+/// the recovery master recorded at account creation and its device
+/// certificate over the version-1 key, bound to that version-1 history entry,
+/// so a verifier can check a succession's master against the one the account
+/// started with. One source for the Cloud that signs it and every verifier.
+///
+/// `lp` of, in order: the tag, the version-1 entry's `account`, its
+/// `entry_hash` exactly as served (hex), the master public key as lowercase
+/// hex, and the SHA-256 of the certificate CBOR as lowercase hex.
+pub fn first_key_evidence_canonical(
+    account: &str,
+    entry_hash: &str,
+    master_public_key: &[u8],
+    certificate_cbor: &[u8],
+) -> Vec<u8> {
+    use sha2::Digest as _;
+    let mut out = Vec::with_capacity(256);
+    lp_push(&mut out, FIRST_KEY_EVIDENCE_VERSION);
+    lp_push(&mut out, account);
+    lp_push(&mut out, entry_hash);
+    lp_push(&mut out, &hex::encode(master_public_key));
+    lp_push(&mut out, &hex::encode(sha2::Sha256::digest(certificate_cbor)));
+    out
+}
+
 /// Base64 (standard) for transporting a succession signature.
 pub fn encode_succession_signature(signature: &[u8; 64]) -> String {
     use base64::Engine as _;
@@ -207,6 +235,31 @@ mod tests {
         let expected = b"25:gc-identity-succession-v1\n11:alice@b.com\n4:AABB\n4:CCDD\n1:2\n10:1750000000\n"
             .to_vec();
         assert_eq!(s.canonical(), expected);
+    }
+
+    #[test]
+    fn first_key_evidence_canonical_is_frozen() {
+        let c = first_key_evidence_canonical("bob@x", "ab01", &[0x0f; 2], b"cbor");
+        let digest = {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(b"cbor"))
+        };
+        let expected = format!("27:gc-kt-first-key-evidence-v1
+5:bob@x
+4:ab01
+4:0f0f
+64:{digest}
+");
+        assert_eq!(String::from_utf8(c.clone()).unwrap(), expected);
+        // Every field is bound.
+        for other in [
+            first_key_evidence_canonical("bob@y", "ab01", &[0x0f; 2], b"cbor"),
+            first_key_evidence_canonical("bob@x", "ab02", &[0x0f; 2], b"cbor"),
+            first_key_evidence_canonical("bob@x", "ab01", &[0x0e; 2], b"cbor"),
+            first_key_evidence_canonical("bob@x", "ab01", &[0x0f; 2], b"cbor2"),
+        ] {
+            assert_ne!(other, c);
+        }
     }
 
     #[test]
