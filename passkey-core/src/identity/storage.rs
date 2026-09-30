@@ -32,15 +32,16 @@ pub fn delete_identity_at(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete identity for a specific user
+/// Delete identity for a specific user. Errors on an invalid username.
 pub fn delete_user_identity(config: &PasskeyConfig, username: &str) -> Result<()> {
-    let identity_path = config.identity_dir(username);
+    let identity_path = config.checked_identity_dir(username)?;
     delete_identity_at(&identity_path)
 }
 
-/// Ensure the identity directory exists for a user
+/// Ensure the identity directory exists for a user. Errors on an invalid
+/// username.
 pub fn ensure_identity_dir(config: &PasskeyConfig, username: &str) -> Result<()> {
-    let identity_path = config.identity_dir(username);
+    let identity_path = config.checked_identity_dir(username)?;
     std::fs::create_dir_all(&identity_path)
         .map_err(|e| PasskeyError::Io(e))?;
     Ok(())

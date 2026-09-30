@@ -104,8 +104,11 @@ pub fn get_active_user(config: &PasskeyConfig) -> Option<String> {
 
 /// Set the active user
 ///
-/// Writes the username to the `active_user` file.
+/// Writes the username to the `active_user` file. Refuses a name that fails
+/// [`validate_user_dir_name`](crate::paths::validate_user_dir_name), so the
+/// pointer can never name a path outside `users/`.
 pub fn set_active_user(config: &PasskeyConfig, username: &str) -> Result<()> {
+    crate::paths::validate_user_dir_name(username)?;
     let active_user_path = config.active_user_path();
 
     // Ensure parent directory exists
@@ -159,9 +162,10 @@ pub fn list_users(config: &PasskeyConfig) -> Vec<String> {
 
 /// Get user info for a specific user
 ///
-/// Reads from `{config}/users/{username}/user_info.json`
+/// Reads from `{config}/users/{username}/user_info.json`. `None` for an
+/// invalid username.
 pub fn get_user_info(config: &PasskeyConfig, username: &str) -> Option<UserInfo> {
-    let user_info_path = config.user_info_path(username);
+    let user_info_path = config.checked_user_dir(username).ok()?.join("user_info.json");
 
     if !user_info_path.exists() {
         return None;
@@ -173,9 +177,10 @@ pub fn get_user_info(config: &PasskeyConfig, username: &str) -> Option<UserInfo>
 
 /// Save user info for a specific user
 ///
-/// Writes to `{config}/users/{username}/user_info.json`
+/// Writes to `{config}/users/{username}/user_info.json`. Errors on an invalid
+/// username.
 pub fn save_user_info(config: &PasskeyConfig, username: &str, info: &UserInfo) -> Result<()> {
-    let user_info_path = config.user_info_path(username);
+    let user_info_path = config.checked_user_dir(username)?.join("user_info.json");
 
     // Ensure parent directory exists
     if let Some(parent) = user_info_path.parent() {
@@ -200,9 +205,10 @@ pub fn get_current_user_info(config: &PasskeyConfig) -> Option<UserInfo> {
 ///
 /// Creates the user directory and identity subdirectory.
 /// Does NOT create identity files - use Identity::save_for_user for that.
+/// Errors on an invalid username.
 pub fn create_user(config: &PasskeyConfig, username: &str) -> Result<()> {
-    let user_dir = config.user_dir(username);
-    let identity_dir = config.identity_dir(username);
+    let user_dir = config.checked_user_dir(username)?;
+    let identity_dir = user_dir.join("identity");
 
     std::fs::create_dir_all(&identity_dir)?;
     tracing::info!("Created user directory: {:?}", user_dir);
@@ -212,9 +218,10 @@ pub fn create_user(config: &PasskeyConfig, username: &str) -> Result<()> {
 
 /// Delete a user and all their data
 ///
-/// Removes the entire user directory including identity files.
+/// Removes the entire user directory including identity files. Errors on an
+/// invalid username without touching the filesystem.
 pub fn delete_user(config: &PasskeyConfig, username: &str) -> Result<()> {
-    let user_dir = config.user_dir(username);
+    let user_dir = config.checked_user_dir(username)?;
 
     if user_dir.exists() {
         std::fs::remove_dir_all(&user_dir)?;
@@ -229,14 +236,17 @@ pub fn delete_user(config: &PasskeyConfig, username: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check if a user exists
+/// Check if a user exists. `false` for an invalid username.
 pub fn user_exists(config: &PasskeyConfig, username: &str) -> bool {
-    config.user_dir(username).exists()
+    config.checked_user_dir(username).map(|d| d.exists()).unwrap_or(false)
 }
 
-/// Check if a user has an identity
+/// Check if a user has an identity. `false` for an invalid username.
 pub fn user_has_identity(config: &PasskeyConfig, username: &str) -> bool {
-    config.identity_dir(username).join("secret.pgp").exists()
+    config
+        .checked_identity_dir(username)
+        .map(|d| d.join("secret.pgp").exists())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

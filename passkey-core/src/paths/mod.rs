@@ -4,10 +4,16 @@
 //! Applications configure passkey-core with their app name and preferences.
 
 mod platform;
+mod username;
 
 pub use platform::*;
+pub use username::{
+    validate_username, is_valid_username, validate_user_dir_name, is_valid_user_dir_name,
+    MAX_USERNAME_LEN, RESERVED_USER_DIR_NAMES,
+};
 
-use std::path::PathBuf;
+use crate::error::{PasskeyError, Result};
+use std::path::{Component, PathBuf};
 
 /// Configuration for passkey-core
 ///
@@ -109,11 +115,53 @@ impl PasskeyConfig {
         self.config_dir().join("users")
     }
 
-    /// Get the directory for a specific user's data
+    /// Get the directory for a specific user's data, **unchecked**.
     ///
-    /// Returns `{config_dir}/users/{username}/`
+    /// Returns `{config_dir}/users/{username}/` by plain `PathBuf::join`, so a
+    /// traversal or absolute `username` escapes `users/`. Use
+    /// [`checked_user_dir`](Self::checked_user_dir) for any name that did not
+    /// come from this library's own validation; every path-writing function in
+    /// passkey-core does.
     pub fn user_dir(&self, username: &str) -> PathBuf {
         self.users_dir().join(username)
+    }
+
+    /// Get the directory for a specific user's data, refusing any name that is
+    /// not a single safe component under `users/`.
+    ///
+    /// Validates `username` with [`validate_user_dir_name`] (an account name or
+    /// an exact reserved internal name), joins it, and asserts the result is a
+    /// direct child of [`users_dir`](Self::users_dir) — lexically always, and
+    /// after resolving links when both the users directory and the target
+    /// already exist (a `users/<name>` link pointing elsewhere is refused).
+    ///
+    /// Returns `{config_dir}/users/{username}/`.
+    pub fn checked_user_dir(&self, username: &str) -> Result<PathBuf> {
+        validate_user_dir_name(username)?;
+        let users_dir = self.users_dir();
+        let dir = users_dir.join(username);
+
+        // Lexical containment: exactly one normal component beyond users_dir.
+        let rest = dir.strip_prefix(&users_dir).map_err(|_| escape(username))?;
+        let mut comps = rest.components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(c)), None) if c == std::ffi::OsStr::new(username) => {}
+            _ => return Err(escape(username)),
+        }
+
+        // Resolved containment, when there is something to resolve.
+        if let (Ok(base), Ok(real)) = (users_dir.canonicalize(), dir.canonicalize()) {
+            if real.parent() != Some(base.as_path()) {
+                return Err(escape(username));
+            }
+        }
+        Ok(dir)
+    }
+
+    /// Checked form of [`identity_dir`](Self::identity_dir): the identity
+    /// directory under [`checked_user_dir`](Self::checked_user_dir).
+    pub fn checked_identity_dir(&self, username: &str) -> Result<PathBuf> {
+        Ok(self.checked_user_dir(username)?.join("identity"))
     }
 
     /// Get a user-specific data path
@@ -154,6 +202,13 @@ impl PasskeyConfig {
     pub fn user_info_path(&self, username: &str) -> PathBuf {
         self.user_data_path(username, "user_info.json")
     }
+}
+
+fn escape(username: &str) -> PasskeyError {
+    PasskeyError::Other(format!(
+        "invalid username {:?}: the user directory would fall outside users/",
+        username
+    ))
 }
 
 #[cfg(feature = "jwt")]

@@ -1,6 +1,6 @@
 # passkey-core
 
-## Synopsis
+## Summary
 
 The identity library underneath GitCellar's no-password authentication: Ed25519/X25519 certificate generation and on-disk multi-user storage, challenge/signature verification, BIP39 24-word recovery codes and their HKDF derivation, stable machine IDs, at-rest key wrap, and the OS-keyring credential store.
 
@@ -9,6 +9,14 @@ Encryption *using* that identity (`.gckey` transfer, identity backup) is `gitcel
 Authentication challenges are signed through `challenge_signing_payload`: the client refuses anything that is not a 64-hex nonce and signs it under a purpose tag (`gc-auth-login-v1`, `gc-auth-registration-pop-v1`), never raw. The server is untrusted, and the same key signs other objects.
 
 Cross-platform PassKey-native authentication library providing Ed25519 identity management, challenge-response authentication, and BIP39 recovery codes.
+
+## File Index
+
+| Entry | Purpose |
+|---|---|
+| `Cargo.toml` | Crate manifest. |
+| `src/` | The library, one module per concern — see `src/README.md`. |
+| `tests/` | Cargo integration tests, one binary per file (at-rest fail-closed, v4 cert profile, headless Local Protection Key, username path safety). Consumed by `cargo test`; not a module. |
 
 ## Features
 
@@ -65,6 +73,15 @@ passkey-core uses a multi-user directory structure:
         │   └── public.pgp
         └── user_info.json
 ```
+
+### Usernames are validated before they become paths
+
+A username is joined into `users/{username}/`, so an unchecked one could walk out of `users/` (`../../x`) or, as an absolute path (`C:\x`, `\\server\share`), replace the base path entirely. Every function here that turns a username into a path or writes `active_user` validates it first, and `tests/username_path_safety.rs` pins that.
+
+- **`validate_username(&str) -> Result<()>`** (and `is_valid_username`) is the account-name rule. It is the Cloud's registration rule: 1–39 ASCII letters (either case) and digits, with single dashes only between them. It also refuses the Windows device names `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9` and `LPT0`–`LPT9`, in any case.
+- **`validate_user_dir_name(&str) -> Result<()>`** (and `is_valid_user_dir_name`) accepts a valid username or an exact entry of `RESERVED_USER_DIR_NAMES`. Today that list is only `_pending_new`, the Desktop's staging directory. A reserved name starts with `_`, which no username can.
+- **`PasskeyConfig::checked_user_dir(name) -> Result<PathBuf>`** and `checked_identity_dir` validate the name, join it, and check the result is a direct child of `users_dir()`. When the path exists, the check is repeated after links are resolved. `user_dir`, `identity_dir`, `user_data_path` and `user_info_path` remain **unchecked** path builders.
+- **Enforced in** `create_user`, `delete_user`, `save_user_info`, `set_active_user`, `Identity::save_for_user`, `Identity::load_user`, `ensure_identity_dir` and `delete_user_identity`, which return an `invalid username` error (`PasskeyError::Other`) and touch nothing. The read-side probes `user_exists`, `user_has_identity`, `Identity::exists_for_user` and `get_user_info` answer `false` or `None`. `list_users` and `get_active_user` are unchanged: they report what is on disk.
 
 ## Authentication Flow
 
@@ -147,7 +164,7 @@ store.clear_all()?;
 
 ## Features
 
-- `keyring` (default) - OS keyring integration. **Saving an identity requires it.** The secret key is always sealed under the Local Protection Key, and there is no plaintext write. A build without `keyring`, or a seal that fails, refuses the save (`Identity::save_to`, `seal_secret_key`).
+- `keyring` (default) - At-rest sealing under the Local Protection Key, which comes from the OS keyring or, on a keyring-less or non-persistent host, from the headless secret (see below). **Saving an identity requires it.** The secret key is always sealed under the Local Protection Key, and there is no plaintext write. A build without `keyring`, or a seal that fails, refuses the save (`Identity::save_to`, `seal_secret_key`).
 - `jwt` (default) - JWT token support
 
 ### The Local Protection Key is never silently re-minted
@@ -158,7 +175,18 @@ store.clear_all()?;
 - **A lost LPK is an `LPK_MISSING` error.**
 - **The only way past that error is to call `remint_local_protection_key`,** which the Desktop does only when it restores an identity from its recovery phrase.
 
-Tests that save an identity where there is no OS keyring install a per-thread key with `keywrap::__set_test_lpk`.
+Tests that save an identity where there is no OS keyring install a per-thread key with `keywrap::__set_test_lpk`, or simulate a keyring-less host with `keywrap::__set_test_host`.
+
+### Where the Local Protection Key lives on each OS
+
+`keywrap::choose_lpk` sets this policy, and `tests/headless_lpk.rs` pins it:
+- **Windows and macOS: the OS keyring (DPAPI / Keychain) comes first.** The headless secret is used only when the keyring fails.
+- **Linux: only the headless secret, and the kernel keyring is never called.** This build's Linux backend is keyutils. It keeps the key only in the session keyring, so the key is lost at logout, reboot or container restart. Docker's default seccomp profile also blocks keyutils outright.
+- **The headless secret is `GITCELLAR_HEADLESS_LPK_SECRET`,** or a file named by `GITCELLAR_HEADLESS_LPK_SECRET_FILE` (a Docker or systemd secret). It must be at least 32 characters, and setting both is refused. The key is HKDF-derived from it (`derive_headless_lpk`), never minted. Every process that opens the same keys needs the same value. The Service's repo-key keyring derives its passphrase the same way, so the identity, the device key and the repo keyring on one host share one key.
+- **With neither, sealing fails closed.** The error names both variables, and nothing is written.
+- **A lost keyring LPK (`LPK_MISSING`) is never replaced by the headless key.** It stays the error it is.
+
+**No Linux Desktop build ships.** The Desktop bundle is a Windows installer only, so a Linux host is a server or a CI container, and its operator sets the secret. If a Linux Desktop ever ships, it needs a persistent store first, such as Secret Service via keyring's `sync-secret-service` feature. Until then a Linux Desktop user sees the fail-closed error, which says which variable to set.
 - `ffi` - C-compatible FFI exports
 
 ```toml

@@ -8,8 +8,10 @@ use std::path::PathBuf;
 ///
 /// # Platform Behavior
 /// - **Windows**: `%APPDATA%\{app_name}` (e.g., `C:\Users\{user}\AppData\Roaming\gitcellar`)
-/// - **macOS**: `~/.config/{app_name}` (following XDG convention)
-/// - **Linux**: `~/.config/{app_name}` (XDG Base Directory Specification)
+/// - **macOS**: `~/Library/Application Support/{app_name}` (`dirs::config_dir()`; `XDG_CONFIG_HOME` is not read)
+/// - **Linux**: `$XDG_CONFIG_HOME/{app_name}`, default `~/.config/{app_name}` (XDG Base Directory Specification)
+///
+/// A test that sandboxes the config dir sets both `APPDATA` and `XDG_CONFIG_HOME`; neither redirects macOS.
 ///
 /// # Arguments
 /// * `app_name` - The application name to use in the path
@@ -24,7 +26,8 @@ pub fn platform_config_dir(app_name: &str) -> PathBuf {
             })
             .join(app_name)
     } else {
-        // On Unix (macOS/Linux), use ~/.config/{app_name}
+        // Elsewhere, dirs::config_dir(): $XDG_CONFIG_HOME or ~/.config on Linux,
+        // ~/Library/Application Support on macOS; ~/.config only if it has none.
         dirs::config_dir()
             .unwrap_or_else(|| {
                 dirs::home_dir()

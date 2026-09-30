@@ -34,13 +34,37 @@
 //! `.key`→`.gckey` auto-migration: an existing identity on disk keeps working,
 //! and the next write re-seals it. No flag-day, no migration script.
 //!
+//! ## Where the LPK lives: a persistent OS keyring, or the headless secret
+//!
+//! The LPK must outlive the process, the login session and a reboot, or every
+//! file sealed under it becomes unreadable. [`choose_lpk`] decides:
+//!
+//! - **Windows / macOS** ([`OS_KEYRING_PERSISTENT`]): the OS keyring (DPAPI /
+//!   Keychain) comes first; only if it *fails* is the headless secret used.
+//! - **Linux and every other target**: this build's keyring backend is kernel
+//!   keyutils, whose session keyring dies at logout, reboot or container
+//!   restart, and which Docker's default seccomp profile blocks outright. It is
+//!   **never called**; the headless secret is the only source.
+//! - **Neither** → an error naming [`HEADLESS_LPK_ENV`]; nothing is written.
+//!
+//! The headless secret is [`HEADLESS_LPK_ENV`], or a file named by
+//! [`HEADLESS_LPK_FILE_ENV`] (a Docker/systemd secret), at least
+//! [`HEADLESS_LPK_MIN_LEN`] characters, HKDF-derived into the LPK
+//! ([`derive_headless_lpk`]). The Service's repo-key keyring uses the same
+//! derivation, so the identity, the device seed and the repo keyring of one
+//! headless host share one LPK, and two containers given the same secret open
+//! each other's seals. No Linux Desktop build ships (the bundle is NSIS-only),
+//! so a Linux host is a server or CI, where an operator sets the secret. The
+//! headless LPK is derived, never minted, so the minted marker and
+//! [`remint_local_protection_key`] do not apply to it.
+//!
 //! ## No plaintext fallback
 //!
-//! If the OS keyring is unavailable (some headless Linux/CI environments with no
-//! Secret-Service daemon), [`wrap_at_rest`] returns an error, and since
+//! If no LPK can be resolved, [`wrap_at_rest`] returns an error, and since
 //! 2026-09-25 the identity writer refuses rather than writing the key
 //! unsealed. A test that needs a sealed write without a keyring
-//! installs a per-thread test key with [`__set_test_lpk`]. The pure
+//! installs a per-thread test key with [`__set_test_lpk`], or simulates a
+//! keyring-less host with [`__set_test_host`]. The pure
 //! [`wrap_with_key`] / [`unwrap_with_key`] primitives never touch the keyring
 //! and are fully deterministic for testing.
 //!
@@ -96,6 +120,149 @@ pub const LPK_MISSING_MARKER: &str = "LPK_MISSING";
 
 /// File name of the "an LPK has been minted for this install" marker.
 pub const LPK_MINTED_MARKER_FILE: &str = "lpk-v1.minted";
+
+/// Environment variable carrying the **headless** LPK secret: the LPK source on
+/// a host whose OS keyring is not persistent (Linux) or has failed. See the
+/// module docs. The raw value is never the key; [`derive_headless_lpk`] is.
+pub const HEADLESS_LPK_ENV: &str = "GITCELLAR_HEADLESS_LPK_SECRET";
+
+/// Environment variable naming a **file** that holds the headless secret — a
+/// Docker or systemd secret, so the value need not sit in the environment.
+/// Setting both it and [`HEADLESS_LPK_ENV`] is refused as ambiguous.
+pub const HEADLESS_LPK_FILE_ENV: &str = "GITCELLAR_HEADLESS_LPK_SECRET_FILE";
+
+/// Minimum length (chars, after trimming) of the headless secret. A floor on
+/// its entropy, not a size cap.
+pub const HEADLESS_LPK_MIN_LEN: usize = 32;
+
+const HEADLESS_LPK_HKDF_SALT: &[u8] = b"gitcellar-headless-lpk-salt/v1";
+const HEADLESS_LPK_HKDF_INFO: &[u8] = b"gitcellar-headless-lpk/v1";
+
+/// Whether this build's OS keyring backend keeps the LPK across logout, reboot
+/// and container restart: DPAPI and the Keychain do; Linux keyutils (the
+/// `linux-native` backend) holds it only in the session keyring, and a target
+/// with no backend gets keyring's in-memory mock.
+pub const OS_KEYRING_PERSISTENT: bool =
+    cfg!(any(target_os = "windows", target_os = "macos", target_os = "ios"));
+
+/// Where the Local Protection Key came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpkSource {
+    /// The OS keyring (DPAPI / Keychain).
+    OsKeyring,
+    /// Derived from the headless secret ([`HEADLESS_LPK_ENV`] / [`HEADLESS_LPK_FILE_ENV`]).
+    Headless,
+}
+
+/// Derive the headless LPK from the raw secret (trimmed): 32 bytes of
+/// HKDF-SHA256. Deterministic, so every process given the same secret derives
+/// the same key. The Service's repo-key keyring passphrase is the STANDARD
+/// base64 of these bytes.
+pub fn derive_headless_lpk(raw: &str) -> Zeroizing<[u8; 32]> {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let hk = Hkdf::<Sha256>::new(Some(HEADLESS_LPK_HKDF_SALT), raw.trim().as_bytes());
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hk.expand(HEADLESS_LPK_HKDF_INFO, &mut *okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
+}
+
+/// Resolve the headless LPK from the two configuration values (pure: the file
+/// is read through `read_file`). `Ok(None)` when neither is set (or both are
+/// blank); `Err` when the configuration is present but unusable — both set, an
+/// unreadable file, or a secret shorter than [`HEADLESS_LPK_MIN_LEN`]. A
+/// present-but-broken configuration is never treated as absent.
+pub fn headless_lpk_from(
+    secret: Option<String>,
+    file: Option<String>,
+    read_file: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
+) -> Result<Option<Zeroizing<[u8; 32]>>> {
+    let secret = secret.map(Zeroizing::new).filter(|v| !v.trim().is_empty());
+    let file = file.filter(|v| !v.trim().is_empty());
+    let (raw, origin) = match (secret, file) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(PasskeyError::CredentialStore(format!(
+                "both {HEADLESS_LPK_ENV} and {HEADLESS_LPK_FILE_ENV} are set; set exactly one"
+            )))
+        }
+        (Some(v), None) => (v, HEADLESS_LPK_ENV.to_string()),
+        (None, Some(path)) => {
+            let path = std::path::PathBuf::from(path.trim());
+            let v = read_file(&path).map_err(|e| {
+                PasskeyError::CredentialStore(format!(
+                    "{HEADLESS_LPK_FILE_ENV} names {}, which could not be read: {e}",
+                    path.display()
+                ))
+            })?;
+            (Zeroizing::new(v), format!("{HEADLESS_LPK_FILE_ENV} ({})", path.display()))
+        }
+    };
+    let len = raw.trim().chars().count();
+    if len < HEADLESS_LPK_MIN_LEN {
+        return Err(PasskeyError::CredentialStore(format!(
+            "the headless LPK secret from {origin} is too short ({len} chars; at least \
+             {HEADLESS_LPK_MIN_LEN} required)"
+        )));
+    }
+    Ok(Some(derive_headless_lpk(&raw)))
+}
+
+/// [`headless_lpk_from`] over this process's environment.
+pub fn headless_lpk_from_env() -> Result<Option<Zeroizing<[u8; 32]>>> {
+    headless_lpk_from(
+        std::env::var(HEADLESS_LPK_ENV).ok(),
+        std::env::var(HEADLESS_LPK_FILE_ENV).ok(),
+        |p| std::fs::read_to_string(p),
+    )
+}
+
+/// Choose the LPK source (pure; see the module docs for the policy).
+///
+/// `os` resolves the key from the OS keyring and is called only when
+/// `os_persistent`. An OS error carrying [`LPK_MISSING_MARKER`] is returned as
+/// is, never papered over with the headless key: the keyring answered, and the
+/// key it held is gone. Any other OS error falls back to `headless`.
+pub fn choose_lpk(
+    os_persistent: bool,
+    os: impl FnOnce() -> Result<[u8; 32]>,
+    headless: impl FnOnce() -> Result<Option<Zeroizing<[u8; 32]>>>,
+) -> Result<(Zeroizing<[u8; 32]>, LpkSource)> {
+    let how_to = format!(
+        "Set {HEADLESS_LPK_ENV} (or {HEADLESS_LPK_FILE_ENV}, a file holding it) to a secret of \
+         at least {HEADLESS_LPK_MIN_LEN} characters that this host keeps; every process that \
+         opens the same keys needs the same value. Nothing was written."
+    );
+    if !os_persistent {
+        return match headless()? {
+            Some(key) => Ok((key, LpkSource::Headless)),
+            None => Err(PasskeyError::CredentialStore(format!(
+                "no persistent place for the at-rest Local Protection Key: this host's OS \
+                 keyring (Linux kernel keyutils) forgets it at logout, reboot or container \
+                 restart, so it is not used. {how_to}"
+            ))),
+        };
+    }
+    let os_err = match os() {
+        Ok(key) => return Ok((Zeroizing::new(key), LpkSource::OsKeyring)),
+        Err(e) if e.to_string().contains(LPK_MISSING_MARKER) => return Err(e),
+        Err(e) => e,
+    };
+    match headless()? {
+        Some(key) => {
+            tracing::warn!(
+                "OS keyring unavailable ({os_err}); sealing at rest under the headless Local \
+                 Protection Key"
+            );
+            Ok((key, LpkSource::Headless))
+        }
+        None => Err(PasskeyError::CredentialStore(format!(
+            "the OS keyring is unavailable for the at-rest Local Protection Key ({os_err}). \
+             {how_to}"
+        ))),
+    }
+}
 
 /// Where the minted marker lives: the GitCellar identity root, next to the
 /// sealed files it vouches for, so the destructive uninstall that sweeps the
@@ -268,14 +435,16 @@ pub fn unwrap_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
         .map_err(|_| PasskeyError::Other("at-rest open failed: wrong key or tampered data".to_string()))
 }
 
-/// Fetch (or first-time create) the per-OS-user Local Protection Key from the
-/// OS keyring, for SEALING ([`LpkMode::Seal`]).
+/// Fetch (or first-time create) the per-OS-user Local Protection Key, for
+/// SEALING ([`LpkMode::Seal`]): from the OS keyring, or on a keyring-less or
+/// non-persistent host from the headless secret (module docs, [`choose_lpk`]).
 ///
 /// Idempotent and stable: the first call resolves the key (reading the keyring,
 /// or minting + persisting one if this install never minted one) and caches it
 /// **process-locally**, so every later call in this process returns the
-/// identical key. Errors with [`PasskeyError::CredentialStore`] if the OS
-/// keyring is unavailable, or if the LPK this install minted has gone missing.
+/// identical key. Errors with [`PasskeyError::CredentialStore`] if neither a
+/// persistent OS keyring nor a headless secret is available, or if the LPK this
+/// install minted has gone missing.
 ///
 /// ## Concurrency
 ///
@@ -290,50 +459,92 @@ pub fn local_protection_key() -> Result<Zeroizing<[u8; 32]>> {
     cached_lpk(LpkMode::Seal)
 }
 
-/// Process-local LPK cache shared by every mode.
+/// Process-local LPK cache shared by every mode, with the source it came from.
 #[cfg(feature = "keyring")]
-fn lpk_cache() -> &'static std::sync::Mutex<Option<[u8; 32]>> {
+fn lpk_cache() -> &'static std::sync::Mutex<Option<([u8; 32], LpkSource)>> {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<Option<([u8; 32], LpkSource)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolve the LPK for this host under `mode`: [`choose_lpk`] over the real OS
+/// keyring and the process environment — or, under [`__set_test_host`], over a
+/// simulated host whose OS keyring always fails.
+#[cfg(feature = "keyring")]
+fn resolve_host_lpk(mode: LpkMode) -> Result<(Zeroizing<[u8; 32]>, LpkSource)> {
+    if let Some(host) = test_override::host() {
+        return choose_lpk(
+            host.os_keyring_persistent,
+            || {
+                Err(PasskeyError::CredentialStore(
+                    "simulated test host: the OS keyring is unavailable".to_string(),
+                ))
+            },
+            || headless_lpk_from(host.headless_secret, None, |_| unreachable!()),
+        );
+    }
+    choose_lpk(
+        OS_KEYRING_PERSISTENT,
+        || resolve_lpk(&KeyringLpkStore::new()?, &lpk_minted_marker_path(), mode),
+        headless_lpk_from_env,
+    )
 }
 
 #[cfg(feature = "keyring")]
 fn cached_lpk(mode: LpkMode) -> Result<Zeroizing<[u8; 32]>> {
-    // The test override always wins and is never cached, so tests can toggle it
-    // between cases.
+    // The test overrides always win and are never cached, so tests can toggle
+    // them between cases.
     if let Some(test_key) = test_override::get() {
         return Ok(Zeroizing::new(test_key));
     }
+    if test_override::host().is_some() {
+        return resolve_host_lpk(mode).map(|(key, _)| key);
+    }
 
     let mut guard = lpk_cache().lock().unwrap();
-    if let Some(cached) = *guard {
+    if let Some((cached, _)) = *guard {
         return Ok(Zeroizing::new(cached));
     }
 
-    let key = resolve_lpk(&KeyringLpkStore::new()?, &lpk_minted_marker_path(), mode)?;
-    *guard = Some(key);
-    Ok(Zeroizing::new(key))
+    let (key, source) = resolve_host_lpk(mode)?;
+    *guard = Some((*key, source));
+    Ok(key)
+}
+
+/// Where this process's Local Protection Key comes from, resolving it (for
+/// sealing) if nothing has yet. For a caller that reports which source it is
+/// running on, such as the Service's headless-keyring warning.
+#[cfg(feature = "keyring")]
+pub fn local_protection_source() -> Result<LpkSource> {
+    if test_override::get().is_some() {
+        return Ok(LpkSource::OsKeyring);
+    }
+    if test_override::host().is_some() {
+        return resolve_host_lpk(LpkMode::Seal).map(|(_, source)| source);
+    }
+    cached_lpk(LpkMode::Seal)?;
+    Ok(lpk_cache().lock().unwrap().map(|(_, s)| s).unwrap_or(LpkSource::OsKeyring))
 }
 
 /// Deliberately replace a lost LPK — the recovery-phrase restore path.
 ///
-/// A no-op when the LPK is present. When it is missing, mints a new one even
-/// though this install minted one before, and says so: whatever was sealed under
-/// the lost key on this machine stays unreadable. Never call this to get past an
-/// [`LPK_MISSING_MARKER`] error on any other path.
+/// A no-op when the LPK is present, and on a headless host, whose LPK is
+/// derived from its secret rather than minted. When the OS keyring's LPK is
+/// missing, mints a new one even though this install minted one before, and
+/// says so: whatever was sealed under the lost key on this machine stays
+/// unreadable. Never call this to get past an [`LPK_MISSING_MARKER`] error on
+/// any other path.
 #[cfg(feature = "keyring")]
 pub fn remint_local_protection_key() -> Result<()> {
     if test_override::get().is_some() {
         return Ok(());
     }
+    if test_override::host().is_some() {
+        return resolve_host_lpk(LpkMode::Remint).map(|_| ());
+    }
     let mut guard = lpk_cache().lock().unwrap();
-    let key = resolve_lpk(
-        &KeyringLpkStore::new()?,
-        &lpk_minted_marker_path(),
-        LpkMode::Remint,
-    )?;
-    *guard = Some(key);
+    let (key, source) = resolve_host_lpk(LpkMode::Remint)?;
+    *guard = Some((*key, source));
     Ok(())
 }
 
@@ -377,10 +588,10 @@ pub fn local_protection_secret() -> Result<String> {
     Ok(B64.encode(&*key))
 }
 
-/// Seal `plaintext` for at-rest storage under the OS-keyring-backed LPK.
+/// Seal `plaintext` for at-rest storage under the LPK.
 ///
-/// Returns an error if the keyring is unavailable or the LPK this install
-/// minted is missing. Callers writing key files must refuse the write rather
+/// Returns an error if no LPK can be resolved (no persistent OS keyring and no
+/// headless secret) or the LPK this install minted is missing. Callers writing key files must refuse the write rather
 /// than fall back to plaintext.
 #[cfg(feature = "keyring")]
 pub fn wrap_at_rest(plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -391,7 +602,7 @@ pub fn wrap_at_rest(plaintext: &[u8]) -> Result<Vec<u8>> {
 /// Open an at-rest payload, transparently passing through legacy plaintext.
 ///
 /// If `data` lacks the wrap magic it is returned unchanged (a pre-F5 plaintext
-/// file). Otherwise it is opened under the OS-keyring-backed LPK, which is
+/// file). Otherwise it is opened under the LPK, which is
 /// never minted on this path: sealed data proves an LPK existed, so a missing
 /// one is an [`LPK_MISSING_MARKER`] error.
 #[cfg(feature = "keyring")]
@@ -452,6 +663,32 @@ mod test_override {
     pub fn set(key: Option<[u8; 32]>) {
         OVERRIDE.with(|c| c.set(key));
     }
+
+    thread_local! {
+        static HOST: std::cell::RefCell<Option<super::TestHost>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn host() -> Option<super::TestHost> {
+        HOST.with(|h| h.borrow().clone())
+    }
+
+    pub fn set_host(host: Option<super::TestHost>) {
+        HOST.with(|h| *h.borrow_mut() = host);
+    }
+}
+
+/// A simulated host for [`__set_test_host`]: its OS keyring always fails, and
+/// it may or may not be persistent and may or may not carry a headless secret.
+#[cfg(feature = "keyring")]
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct TestHost {
+    /// Whether the simulated OS keyring counts as persistent (Windows/macOS)
+    /// — it still fails — or not (Linux keyutils), in which case it is never
+    /// consulted at all.
+    pub os_keyring_persistent: bool,
+    /// The simulated [`HEADLESS_LPK_ENV`] value.
+    pub headless_secret: Option<String>,
 }
 
 /// Install a fixed Local Protection Key for the CURRENT THREAD, bypassing the
@@ -464,6 +701,18 @@ mod test_override {
 #[doc(hidden)]
 pub fn __set_test_lpk(key: Option<[u8; 32]>) {
     test_override::set(key);
+}
+
+/// Simulate, for the CURRENT THREAD, a host whose OS keyring fails — a Linux
+/// host (not persistent) or a broken Windows/macOS credential store — with or
+/// without a headless secret. **Test-only**: it drives the real
+/// [`wrap_at_rest`] / [`unwrap_at_rest`] through [`choose_lpk`] on a machine
+/// whose keyring always answers, and never touches the real keyring or the
+/// process environment. [`__set_test_lpk`] takes precedence. Pass `None` to clear.
+#[cfg(feature = "keyring")]
+#[doc(hidden)]
+pub fn __set_test_host(host: Option<TestHost>) {
+    test_override::set_host(host);
 }
 
 #[cfg(test)]

@@ -64,6 +64,9 @@ pub mod identity_succession;
 
 // Re-export identity types from gitcellar-identity (wraps passkey-core)
 pub use gitcellar_identity::Identity;
+// The one username allowlist, for every consumer
+// that turns a Cloud- or user-supplied name into a path under `users/`.
+pub use gitcellar_identity::{is_valid_username, validate_user_dir_name, validate_username};
 pub use gitcellar_identity::PasskeyError;
 pub use gitcellar_identity::PasskeyConfig;
 pub use gitcellar_identity::config as gitcellar_config;
@@ -152,7 +155,15 @@ pub fn identity_exists() -> bool {
 /// Falls back to `config_dir()/identity/` if no active user
 pub fn identity_dir() -> PathBuf {
     if let Some(username) = get_active_user() {
-        gitcellar_identity::identity_dir(&username)
+        // The active-user file is plain text; a name that is not a user
+        // directory name must not steer this path outside `users/`.
+        match gitcellar_identity::gitcellar_config().checked_identity_dir(&username) {
+            Ok(dir) => dir,
+            Err(e) => {
+                tracing::error!("active user is not a valid user directory name ({e}); using the legacy identity path");
+                config_dir().join("identity")
+            }
+        }
     } else {
         // Fallback to legacy path
         config_dir().join("identity")
@@ -219,9 +230,10 @@ pub use identity_succession::{
     IDENTITY_SUCCESSION_VERSION,
 };
 pub use broadcast::{
-    action_url_allowed, verify_detached, BroadcastPayload, BroadcastTargeting, BroadcastTier,
-    IncidentManifest, ManifestState, ManifestVerdict, ACTION_URL_ALLOWLIST,
-    BROADCAST_PAYLOAD_VERSION, INCIDENT_MANIFEST_VERSION,
+    action_url_allowed, incident_manifest_signed_bytes, verify_detached, BroadcastPayload,
+    BroadcastTargeting, BroadcastTier, IncidentManifest, ManifestState, ManifestVerdict,
+    ACTION_URL_ALLOWLIST, BROADCAST_PAYLOAD_VERSION, INCIDENT_MANIFEST_DOMAIN,
+    INCIDENT_MANIFEST_VERSION,
 };
 
 use std::path::PathBuf;

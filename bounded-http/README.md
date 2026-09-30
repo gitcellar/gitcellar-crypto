@@ -1,6 +1,6 @@
 # bounded-http
 
-## Synopsis
+## Summary
 
 The one shared implementation of "read this HTTP response body, but never buffer more than N bytes", for every path that talks to a storage provider — the party the zero-access threat model treats as hostile. Here: `read_body_bounded`, `read_text_bounded`, the 64 MiB object and 64 KiB diagnostic ceilings, and a loopback hostile-provider test.
 
@@ -22,6 +22,8 @@ implementation rather than a copy in each crate.
 
 | File | Description |
 |------|-------------|
+| `Cargo.toml` | Crate manifest: `reqwest` (with `stream`, for `Response::chunk`) and `thiserror`; dev-dep `tokio` for the loopback test |
+| `Cargo.lock` | Lockfile pinning this crate's `cargo test` runs where it is built on its own |
 | `src/lib.rs` | The crate — `read_body_bounded`, `read_text_bounded`, `BoundedReadError`, the two default ceilings |
 | `tests/hostile_provider.rs` | The guards driven against a real loopback server playing a malicious provider |
 

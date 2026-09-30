@@ -79,6 +79,8 @@ pub mod keywrap;
 // Re-exports for convenience
 pub use error::{PasskeyError, Result};
 pub use paths::{PasskeyConfig, platform_config_dir, platform_data_dir, hostname, platform_name};
+pub use paths::{validate_username, is_valid_username, validate_user_dir_name, is_valid_user_dir_name,
+                MAX_USERNAME_LEN, RESERVED_USER_DIR_NAMES};
 
 #[cfg(feature = "jwt")]
 pub use paths::JwtConfig;

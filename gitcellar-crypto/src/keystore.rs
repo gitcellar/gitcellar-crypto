@@ -36,12 +36,15 @@ use crate::device_cert::DeviceCertificate;
 /// Filename for the device's private key (32 raw bytes).
 pub const DEVICE_PRIVATE_FILENAME: &str = "device.key.bin";
 
-/// Seal the 32-byte device seed for at-rest storage via the OS-keyring/DPAPI
-/// -backed Local Protection Key (F5 / AC-F5.1 / DEC-LD-03).
+/// Seal the 32-byte device seed for at-rest storage under the Local Protection
+/// Key (F5 / AC-F5.1 / DEC-LD-03): the OS keyring's (DPAPI / Keychain), or on a
+/// host whose keyring is unavailable or not persistent (Linux) the headless
+/// secret's (`GITCELLAR_HEADLESS_LPK_SECRET`; see `passkey_core::keywrap`).
 ///
-/// **Fails closed.** If the OS keyring is unavailable (headless/CI without
-/// Secret-Service), or the crate was built without the `keyring` feature, this
-/// returns [`KeystoreError::Unavailable`] and nothing is written: a device seed
+/// **Fails closed.** If neither is available this returns
+/// [`KeystoreError::SealUnavailable`], carrying the reason and what to set; if
+/// the crate was built without the `keyring` feature,
+/// [`KeystoreError::Unavailable`]. Either way nothing is written: a device seed
 /// never reaches disk as plaintext. Until 2026-09-25 it returned the raw seed
 /// with a warning "to preserve availability", so a keyring failure silently
 /// downgraded the at-rest seal to filesystem permissions.
@@ -55,7 +58,7 @@ pub fn try_seal_device_seed_at_rest(seed: &[u8; 32]) -> Result<Vec<u8>, Keystore
                 "At-rest wrap unavailable for device seed ({}); refusing to write it unsealed.",
                 e
             );
-            KeystoreError::Unavailable
+            KeystoreError::SealUnavailable(e.to_string())
         })
     }
     #[cfg(not(feature = "keyring"))]
@@ -125,6 +128,11 @@ pub const MASTER_PUBLIC_FILENAME: &str = "master.pub.bin";
 pub enum KeystoreError {
     #[error("keystore backend not available (no OS keyring to seal key material at rest)")]
     Unavailable,
+
+    /// The at-rest seal could not be made; the text says why and, on a
+    /// keyring-less host, which headless secret to set.
+    #[error("cannot seal the device key at rest: {0}")]
+    SealUnavailable(String),
 
     #[error("device key not initialized — call generate_device_keypair first")]
     NotInitialized,
@@ -322,8 +330,9 @@ impl KeystoreBackend for FileSystemKeystore {
         // OS-keyring/DPAPI-backed Local Protection Key before it touches disk.
         // The on-disk `device.key.bin` is never 32 raw plaintext bytes; an
         // infostealer reading it off disk gets AES-256-GCM ciphertext, closing
-        // the Windows inherited-ACL gap. With no OS keyring the seal fails and
-        // so does this call, before anything is written (fail closed).
+        // the Windows inherited-ACL gap. With no LPK (no persistent OS keyring
+        // and no headless secret) the seal fails and so does this call, before
+        // anything is written (fail closed).
         let sealed = match (self.sealer)(&secret_bytes) {
             Ok(sealed) => sealed,
             Err(e) => {

@@ -16,6 +16,21 @@
 //! it: the signer signs `payload.as_bytes()`, and every verifier verifies the
 //! signature against the exact `payload` bytes it received, parsing the typed
 //! struct only *after* the signature checks out. See the broadcast interface contract §0.
+//!
+//! ## The incident manifest signs its envelope, not just the payload
+//!
+//! An [`IncidentManifest`]'s `signature` is NOT a bare-payload signature: it
+//! covers [`IncidentManifest::signed_bytes`], a domain-tagged, length-prefixed
+//! canonical over `manifest_v`, `state`, `seq`, `signer_fingerprint` and the
+//! verbatim `payload` string. The payload bytes are still transported and
+//! verified verbatim (they are one field of the signed canonical). `state` is
+//! what turns a manifest into an all-clear, so it must be authenticated: when
+//! it sat outside the signature (manifest v1)
+//! anyone serving `incident.json` could flip a genuine Active incident to
+//! Clear — burning its `seq`, so the real incident then read as Stale — or a
+//! genuine Clear back to Active. The domain tag also keeps a manifest
+//! signature from verifying as a bare-payload (SSE-leg) signature and vice
+//! versa.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
@@ -28,7 +43,18 @@ use crate::error::{CryptoError, Result};
 pub const BROADCAST_PAYLOAD_VERSION: u32 = 1;
 
 /// Envelope version of the [`IncidentManifest`] (broadcast interface contract §2).
-pub const INCIDENT_MANIFEST_VERSION: u32 = 1;
+///
+/// v2: the signature covers
+/// [`IncidentManifest::signed_bytes`] (the envelope, `state` included), not the
+/// bare payload. A v1 manifest is refused as an unknown version — nothing was
+/// deployed, so there is no compatibility path.
+pub const INCIDENT_MANIFEST_VERSION: u32 = 2;
+
+/// Domain tag leading [`IncidentManifest::signed_bytes`]. Distinct from every
+/// other signed canonical in this crate, so a manifest signature cannot be
+/// replayed as another protocol's signature, nor a bare-payload (SSE-leg)
+/// signature lifted into a manifest.
+pub const INCIDENT_MANIFEST_DOMAIN: &str = "gitcellar/incident-manifest/v2";
 
 /// Phase-1 `action_url` host allowlist (broadcast interface contract §3 / BC-SEC-03,
 /// DEC-BC-07). Exact host match, `https` only. Enforced on author-side (compose
@@ -201,22 +227,39 @@ pub enum ManifestState {
     Clear,
 }
 
+impl ManifestState {
+    /// The wire string (`"active"` / `"clear"`), identical to the serde form;
+    /// this is the value bound into [`IncidentManifest::signed_bytes`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ManifestState::Active => "active",
+            ManifestState::Clear => "clear",
+        }
+    }
+}
+
 /// The off-infra `incident.json` object (broadcast interface contract §2 / C-05,
-/// DEC-BC-11). Always present, always signed.
+/// DEC-BC-11). Always present, always signed — over the envelope, so `state`
+/// is authenticated (see [`IncidentManifest::signed_bytes`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncidentManifest {
-    /// Envelope version (`INCIDENT_MANIFEST_VERSION`).
+    /// Envelope version (`INCIDENT_MANIFEST_VERSION`). Signed.
     pub manifest_v: u32,
+    /// Active incident or signed all-clear. Signed: a relay that flips it
+    /// breaks the signature.
     pub state: ManifestState,
     /// Monotonic; MUST equal the embedded `payload.seq`.
     pub seq: i64,
     /// Canonical JSON STRING of the `BroadcastPayload` (verbatim signed bytes).
     pub payload: String,
-    /// base64 detached OpenPGP signature over `payload.as_bytes()`.
+    /// base64 detached OpenPGP signature over [`IncidentManifest::signed_bytes`]
+    /// (NOT over `payload.as_bytes()` alone).
     pub signature: String,
     /// Duplicated at envelope level for cheap pre-parse routing; MUST match the
-    /// fingerprint inside `payload`.
+    /// fingerprint inside `payload`. Signed.
     pub signer_fingerprint: String,
+    /// MUST equal the embedded `payload.issued_at` (checked, so authenticated
+    /// through the payload).
     pub issued_at: DateTime<Utc>,
 }
 
@@ -243,6 +286,52 @@ pub enum ManifestVerdict {
 }
 
 impl IncidentManifest {
+    /// The exact bytes an incident-manifest signature covers:
+    ///
+    /// ```text
+    /// lp(INCIDENT_MANIFEST_DOMAIN) ‖ lp(manifest_v, decimal) ‖ lp(state: "active"|"clear")
+    ///   ‖ lp(seq, decimal) ‖ lp(signer_fingerprint) ‖ lp(payload)
+    /// ```
+    ///
+    /// with `lp` = [`crate::canonical::lp_push`] (`<len>:<bytes>\n`), so no two
+    /// distinct envelopes serialize to the same bytes. `payload` is the
+    /// verbatim canonical `BroadcastPayload` string. `issued_at` is not a
+    /// separate field: the verifier requires it to equal `payload.issued_at`,
+    /// which the signature already covers.
+    pub fn signed_bytes(&self) -> Vec<u8> {
+        incident_manifest_signed_bytes(
+            self.manifest_v,
+            self.state,
+            self.seq,
+            &self.signer_fingerprint,
+            &self.payload,
+        )
+    }
+
+    /// Build and sign a current-version manifest for `payload` in `state` —
+    /// the one producer path (the `sign_manifest` example, test fixtures).
+    /// `seq`, `signer_fingerprint` and `issued_at` are copied from the payload,
+    /// so the envelope is consistent by construction; the caller makes
+    /// `payload.signer_fingerprint` name `engine`'s key.
+    pub fn sign(
+        engine: &crate::encryption::EncryptionEngine,
+        state: ManifestState,
+        payload: &BroadcastPayload,
+    ) -> Result<Self> {
+        let mut manifest = IncidentManifest {
+            manifest_v: INCIDENT_MANIFEST_VERSION,
+            state,
+            seq: payload.seq,
+            payload: payload.to_canonical_json()?,
+            signature: String::new(),
+            signer_fingerprint: payload.signer_fingerprint.clone(),
+            issued_at: payload.issued_at,
+        };
+        let sig = engine.sign_data(&manifest.signed_bytes())?;
+        manifest.signature = BASE64.encode(sig);
+        Ok(manifest)
+    }
+
     /// Verify the manifest's signature against `trust_set` (a set of
     /// ASCII-armored OpenPGP public keys — try each), enforce field-consistency,
     /// replay/downgrade (`seq > last_verified_seq`), and expiry. Pure: no I/O.
@@ -261,8 +350,10 @@ impl IncidentManifest {
             };
         }
 
-        // Step 2 (signature): verify over the verbatim payload bytes against the
-        // trust SET — ANY key validates accepts.
+        // Step 2 (signature): verify over the signed envelope bytes (domain tag,
+        // manifest_v, state, seq, signer_fingerprint, verbatim payload) against
+        // the trust SET — ANY key validates accepts. `state` is inside these
+        // bytes, so a manifest whose state was flipped does not verify.
         let sig_bytes = match BASE64.decode(self.signature.as_bytes()) {
             Ok(b) => b,
             Err(_) => {
@@ -271,9 +362,9 @@ impl IncidentManifest {
                 }
             }
         };
-        let payload_bytes = self.payload.as_bytes();
+        let signed = self.signed_bytes();
         let sig_ok = trust_set.iter().any(|armored_key| {
-            verify_detached(armored_key, payload_bytes, &sig_bytes).unwrap_or(false)
+            verify_detached(armored_key, &signed, &sig_bytes).unwrap_or(false)
         });
         if !sig_ok {
             return ManifestVerdict::NoTrustedSignal {
@@ -305,6 +396,11 @@ impl IncidentManifest {
                 reason: "envelope/payload seq mismatch".into(),
             };
         }
+        if payload.issued_at != self.issued_at {
+            return ManifestVerdict::NoTrustedSignal {
+                reason: "envelope/payload issued_at mismatch".into(),
+            };
+        }
 
         // Step 4 (replay/downgrade): reject seq <= high-water mark.
         if self.seq <= last_verified_seq {
@@ -312,6 +408,7 @@ impl IncidentManifest {
         }
 
         // Step 6 (clear): a signed clear is recognized by `state`, not contents.
+        // `state` is authenticated: step 2 verified it inside `signed_bytes`.
         if self.state == ManifestState::Clear {
             return ManifestVerdict::Clear { seq: self.seq };
         }
@@ -329,6 +426,26 @@ impl IncidentManifest {
             seq: self.seq,
         }
     }
+}
+
+/// Field-by-field form of [`IncidentManifest::signed_bytes`] (the layout is
+/// documented there).
+pub fn incident_manifest_signed_bytes(
+    manifest_v: u32,
+    state: ManifestState,
+    seq: i64,
+    signer_fingerprint: &str,
+    payload: &str,
+) -> Vec<u8> {
+    use crate::canonical::lp_push;
+    let mut out = Vec::with_capacity(payload.len() + 128);
+    lp_push(&mut out, INCIDENT_MANIFEST_DOMAIN);
+    lp_push(&mut out, &manifest_v.to_string());
+    lp_push(&mut out, state.as_str());
+    lp_push(&mut out, &seq.to_string());
+    lp_push(&mut out, signer_fingerprint);
+    lp_push(&mut out, payload);
+    out
 }
 
 /// Verify an OpenPGP detached signature over `data` against an ASCII-armored
@@ -527,18 +644,12 @@ mod tests {
         assert_ne!(tampered, payload);
         assert!(!verify_detached(&public, tampered.as_bytes(), &sig).unwrap());
 
-        // Full manifest round-trip through verify_and_parse with this key.
-        let manifest = IncidentManifest {
-            manifest_v: INCIDENT_MANIFEST_VERSION,
-            state: ManifestState::Active,
-            seq: 123,
-            payload: payload.clone(),
-            signature: BASE64.encode(&sig),
-            signer_fingerprint: BroadcastPayload::from_canonical_json(&payload)
-                .unwrap()
-                .signer_fingerprint,
-            issued_at: "2026-05-26T22:50:00Z".parse().unwrap(),
-        };
+        // Full manifest round-trip through verify_and_parse with this key. The
+        // manifest signature covers the v2 envelope (`signed_bytes`, which
+        // binds `state`), not the bare payload, so it is built by `sign`.
+        let manifest =
+            IncidentManifest::sign(&engine, ManifestState::Active, &sample_payload(123)).unwrap();
+        assert_eq!(manifest.payload, payload);
         let now = "2026-05-26T23:00:00Z".parse().unwrap();
         // fingerprint inside payload is "A1B2C3D4" (sample), envelope copies it
         // -> consistent; signature valid -> Active.

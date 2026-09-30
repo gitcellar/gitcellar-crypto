@@ -96,8 +96,10 @@ impl Identity {
     /// # Arguments
     /// * `config` - PasskeyConfig with path settings
     /// * `username` - The username to load identity for
+    ///
+    /// Errors on an invalid username (see `paths::validate_user_dir_name`).
     pub fn load_user(config: &PasskeyConfig, username: &str) -> Result<Self> {
-        let identity_path = config.identity_dir(username);
+        let identity_path = config.checked_identity_dir(username)?;
         Self::load_from(&identity_path)
     }
 
@@ -151,8 +153,12 @@ impl Identity {
     }
 
     /// Check if an identity exists for a specific user
+    /// `false` for an invalid username.
     pub fn exists_for_user(config: &PasskeyConfig, username: &str) -> bool {
-        config.identity_dir(username).join(SECRET_KEY_FILE).exists()
+        config
+            .checked_identity_dir(username)
+            .map(|d| d.join(SECRET_KEY_FILE).exists())
+            .unwrap_or(false)
     }
 
     /// Save identity for a specific user
@@ -160,8 +166,11 @@ impl Identity {
     /// # Arguments
     /// * `config` - PasskeyConfig with path settings
     /// * `username` - The username to save identity for
+    ///
+    /// Errors on an invalid username (see `paths::validate_user_dir_name`)
+    /// before anything is written.
     pub fn save_for_user(&self, config: &PasskeyConfig, username: &str) -> Result<()> {
-        let identity_path = config.identity_dir(username);
+        let identity_path = config.checked_identity_dir(username)?;
         self.save_to(&identity_path)
     }
 

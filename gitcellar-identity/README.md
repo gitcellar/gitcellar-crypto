@@ -1,6 +1,6 @@
 # gitcellar-identity
 
-## Synopsis
+## Summary
 
 A thin defaults crate, not an implementation: a single `src/lib.rs` (~300 lines) that glob-re-exports `passkey-core` and pins GitCellar's conventions on top — app name `gitcellar`, machine-ID prefix `gcm`, and the `%APPDATA%\gitcellar` / `~/.config/gitcellar` config root.
 Every module the API section below documents (`identity`, `multi_user`, `auth`, `recovery`, `keywrap`) is `passkey-core`'s code surfaced through here — Ed25519/X25519 generation, BIP-39 phrases, the identity state machine and the at-rest key wrap all live there, so read that crate to change behaviour.
