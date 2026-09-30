@@ -15,10 +15,12 @@
 use std::cell::Cell;
 
 use passkey_core::keywrap::{
-    self, choose_lpk, derive_headless_lpk, headless_lpk_from, is_wrapped, unwrap_with_key,
-    LpkSource, TestHost, HEADLESS_LPK_ENV, HEADLESS_LPK_FILE_ENV, HEADLESS_LPK_MIN_LEN,
+    choose_lpk, derive_headless_lpk, headless_lpk_from,
+    LpkSource, HEADLESS_LPK_ENV, HEADLESS_LPK_FILE_ENV, HEADLESS_LPK_MIN_LEN,
     LPK_MISSING_MARKER,
 };
+#[cfg(feature = "keyring")]
+use passkey_core::keywrap::{self, is_wrapped, unwrap_with_key, TestHost};
 use passkey_core::PasskeyError;
 use zeroize::Zeroizing;
 
@@ -186,10 +188,12 @@ fn setting_both_the_secret_and_the_file_is_refused_as_ambiguous() {
 
 // ---- the real seal path on a simulated host ---------------------------------
 
+#[cfg(feature = "keyring")]
 fn linux_host(secret: Option<&str>) -> TestHost {
     TestHost { os_keyring_persistent: false, headless_secret: secret.map(str::to_string) }
 }
 
+#[cfg(feature = "keyring")]
 #[test]
 fn wrap_at_rest_on_a_keyring_less_host_seals_under_the_headless_key() {
     keywrap::__set_test_host(Some(linux_host(Some(SECRET))));
@@ -208,6 +212,7 @@ fn wrap_at_rest_on_a_keyring_less_host_seals_under_the_headless_key() {
     keywrap::__set_test_host(None);
 }
 
+#[cfg(feature = "keyring")]
 #[test]
 fn wrap_at_rest_on_a_keyring_less_host_without_a_secret_refuses() {
     keywrap::__set_test_host(Some(linux_host(None)));
@@ -216,6 +221,7 @@ fn wrap_at_rest_on_a_keyring_less_host_without_a_secret_refuses() {
     keywrap::__set_test_host(None);
 }
 
+#[cfg(feature = "keyring")]
 #[test]
 fn a_seal_made_with_one_secret_does_not_open_with_another() {
     keywrap::__set_test_host(Some(linux_host(Some(SECRET))));
@@ -225,6 +231,7 @@ fn a_seal_made_with_one_secret_does_not_open_with_another() {
     keywrap::__set_test_host(None);
 }
 
+#[cfg(feature = "keyring")]
 #[test]
 fn an_identity_saved_on_a_keyring_less_host_is_sealed_and_reloads_after_a_restart() {
     use passkey_core::identity::Identity;
@@ -248,6 +255,7 @@ fn an_identity_saved_on_a_keyring_less_host_is_sealed_and_reloads_after_a_restar
     keywrap::__set_test_host(None);
 }
 
+#[cfg(feature = "keyring")]
 #[test]
 fn an_identity_save_on_a_keyring_less_host_without_a_secret_writes_nothing() {
     use passkey_core::identity::Identity;

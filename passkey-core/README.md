@@ -15,7 +15,7 @@ Cross-platform PassKey-native authentication library providing Ed25519 identity 
 | Entry | Purpose |
 |---|---|
 | `Cargo.toml` | Crate manifest. |
-| `src/` | The library, one module per concern — see `src/README.md`. |
+| `src/` | The library, one module per concern. |
 | `tests/` | Cargo integration tests, one binary per file (at-rest fail-closed, v4 cert profile, headless Local Protection Key, username path safety). Consumed by `cargo test`; not a module. |
 
 ## Features
