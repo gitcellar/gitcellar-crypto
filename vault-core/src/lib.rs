@@ -19,34 +19,38 @@
 //! ## Quick Start (Rust)
 //!
 //! ```rust,no_run
-//! use vault_core::{ChunkEngine, ChunkConfig, EncryptionEngine};
+//! use vault_core::{ChunkAad, ChunkConfig, ChunkEngine, ChunkKeying, EncryptionEngine};
 //! use vault_core::encryption::XChaChaChunkEngine;
 //! use vault_core::storage::{FileStorage, StorageBackend};
 //!
 //! # async fn example() -> vault_core::error::VaultResult<()> {
-//! // 1. Chunk the data
-//! let chunker = ChunkEngine::new(ChunkConfig::default());
+//! // Per-repo keys. In practice each is HKDF-SHA256 of the per-repo root key
+//! // K_repo under its own info string; gitcellar-crypto derives them.
+//! let k_repo = [0u8; 32];
+//! let keying = ChunkKeying::derive(&[1u8; 32], &[2u8; 32]); // boundary key, naming key
+//!
+//! // The repository's immutable id (never its owner/name, which a rename
+//! // changes) and the repository key version that seals.
+//! let repo_uid = "5f0c9e7a2b1d4c3e8f6a0b9c7d2e1f30";
+//! let key_version = 1;
+//!
+//! // 1. Keyed chunking: per-repo boundaries and HMAC-SHA256 chunk names
+//! let chunker = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), keying);
 //! let data = std::fs::read("large_file.bin")?;
 //! let chunks = chunker.chunk_data(&data)?;
 //!
-//! // 2. Encrypt each chunk (XChaCha20-Poly1305; content key from the per-repo K_repo).
-//! //    The chunk's identity is bound into the AEAD as associated data (H-1), so a
-//! //    stored blob cannot be spliced/substituted under another identity.
-//! let k_repo = [0u8; 32]; // in practice: derived from the per-repo X25519 key
+//! // 2. Seal each chunk (XChaCha20-Poly1305, chunk format v3). Its identity is
+//! //    bound into the AEAD as associated data (H-1), so a stored blob cannot be
+//! //    spliced or substituted under another identity or key version.
 //! let encryptor = XChaChaChunkEngine::new(&k_repo)?;
-//! let mut encrypted_data = Vec::new();
-//! for chunk in &chunks {
-//!     let aad = vault_core::ChunkAad::for_content_chunk(
-//!         "alice/example-repo",
-//!         &chunk.hash,
-//!         chunk.size as u64,
-//!     );
-//!     encrypted_data = encryptor.encrypt_chunk(chunk, &aad)?;
-//! }
-//!
-//! // 3. Upload to cloud storage
 //! let storage = FileStorage::new("/tmp/vault-storage")?;
-//! storage.upload("chunks/abc123", &encrypted_data).await?;
+//! for chunk in &chunks {
+//!     let aad = ChunkAad::content(repo_uid, &chunk.hash, key_version, chunk.size as u64)?;
+//!     let sealed = encryptor.encrypt_chunk(chunk, &aad)?;
+//!
+//!     // 3. Upload to storage under the chunk's keyed name
+//!     storage.upload(&format!("chunks/{}", chunk.hash), &sealed).await?;
+//! }
 //! # Ok(())
 //! # }
 //! ```

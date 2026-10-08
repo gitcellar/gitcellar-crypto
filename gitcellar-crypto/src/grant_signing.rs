@@ -1,4 +1,4 @@
-//! I-1 — origin signatures over repo-key grants (`gc-grant-v1`).
+//! I-1 — origin signatures over repo-key grants (`gc-grant-v2`).
 //!
 //! ## The defect this closes (grant integrity rested entirely on TOFU)
 //!
@@ -38,9 +38,9 @@
 //! ## The canonical (frozen)
 //!
 //! ```text
-//! lp("gc-grant-v1") ‖ lp(repo_id) ‖ lp(key_version) ‖ lp(recipient_fingerprint)
-//!                   ‖ lp(granter_fingerprint) ‖ lp(key_material_b64)
-//!                   ‖ lp(timestamp_unix)
+//! lp("gc-grant-v2") ‖ lp(repo_uid) ‖ lp(key_version)
+//!                   ‖ lp(recipient_fingerprint) ‖ lp(granter_fingerprint)
+//!                   ‖ lp(key_material_b64) ‖ lp(timestamp_unix)
 //! ```
 //!
 //! where `lp` is [`crate::canonical::lp_push`] (`<decimal-len>:<bytes>\n`) —
@@ -48,10 +48,20 @@
 //! prefixes make the composition injection-safe: no field's contents can be
 //! shifted across a boundary to forge a different tuple with the same bytes.
 //!
+//! **v2 (2026-10).** v1 bound only the repository's
+//! `owner/name`, so a grant stopped verifying the moment the repository was
+//! renamed or transferred. v2 binds the repository's immutable `repo_uid` and
+//! nothing that names it: every verifier passes the uid, so a grant signed
+//! before a rename verifies after it. The v1 tag is deleted, not kept as a
+//! fallback. A recipient learns
+//! which uid a name means from the owner-signed repo-owner binding
+//! (`gc-repo-owner-v2`), never from the relay.
+//!
 //! **Why each field is bound:**
 //!
-//! - `repo_id` + `key_version` — a signature over a grant for repo A / v1
+//! - `repo_uid` + `key_version` — a signature over a grant for repo A / v1
 //!   cannot be replayed as repo B, or as a later version of the same repo.
+//!   The display name is not bound, so a rename touches no grant.
 //! - `recipient_fingerprint` — binds the grant to WHO it is for. Without it, a
 //!   genuine grant intended for Alice could be relayed to Bob and still verify.
 //! - `granter_fingerprint` — binds the claimed author into the signed bytes, so
@@ -91,16 +101,16 @@
 //! signature covers it, under a separate domain tag:
 //!
 //! ```text
-//! lp("gc-grant-delegated-v1") ‖ <the six gc-grant-v1 fields, same order>
-//!     ‖ lp(del.repo_id) ‖ lp(del.delegate_account) ‖ lp(del.delegate_fingerprint)
+//! lp("gc-grant-delegated-v2") ‖ <the six gc-grant-v2 fields, same order>
+//!     ‖ lp(del.repo_uid) ‖ lp(del.delegate_account) ‖ lp(del.delegate_fingerprint)
 //!     ‖ lp(del.key_version) ‖ lp(del.timestamp_unix) ‖ lp(del.expires_at_unix)
 //!     ‖ lp(del.delegation_sig_b64)
 //! ```
 //!
 //! So a relay that strips the delegation (the canonical falls back to
-//! `gc-grant-v1`), swaps it, or edits any field of it breaks the grant signature.
-//! A bundle with no delegation signs and verifies exactly as before — the
-//! `gc-grant-v1` canonical is untouched. This module proves only that the
+//! `gc-grant-v2`), swaps it, or edits any field of it breaks the grant signature.
+//! A bundle with no delegation signs and verifies under the plain
+//! `gc-grant-v2` canonical. This module proves only that the
 //! granter authored the grant *with this delegation attached*; whether the
 //! delegation authorizes the granter is `authorize_repo_grant`'s decision
 //! (key-directory feature), fed by [`GrantBundle::repo_delegation`].
@@ -112,12 +122,13 @@ use crate::error::{CryptoError, Result};
 
 /// Versioned domain tag for the grant canonical. Bump ONLY with a coordinated
 /// granter+recipient change — old signatures stop verifying (by design).
-pub const GRANT_CANONICAL_VERSION: &str = "gc-grant-v1";
+/// v2 binds the repository's immutable `repo_uid`.
+pub const GRANT_CANONICAL_VERSION: &str = "gc-grant-v2";
 
 /// Domain tag for the canonical of a grant that carries a delegation (KTD-6).
 /// Distinct from [`GRANT_CANONICAL_VERSION`], so a delegated grant's signature
 /// can never verify as a plain grant once its delegation is stripped.
-pub const DELEGATED_GRANT_CANONICAL_VERSION: &str = "gc-grant-delegated-v1";
+pub const DELEGATED_GRANT_CANONICAL_VERSION: &str = "gc-grant-delegated-v2";
 
 /// Normalize a fingerprint for canonical use: uppercase, whitespace stripped.
 ///
@@ -141,9 +152,9 @@ pub fn normalize_fingerprint(fingerprint: &str) -> String {
 /// its own identity, then verifies. See the module docs for the canonical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoKeyGrant {
-    /// Repository this grant is for (the Service's `repo_id` / the Cloud's
-    /// `repo_identifier` — the same string both tiers key grants on).
-    pub repo_id: String,
+    /// The repository's immutable id (`repo_uid`), minted with its first key.
+    /// A rename or transfer does not change it, so the grant keeps verifying.
+    pub repo_uid: String,
     /// Key version this grant delivers (matches the Cloud's `key_version`).
     pub key_version: i32,
     /// The RECIPIENT's identity-key fingerprint — who this grant is for.
@@ -161,10 +172,11 @@ pub struct RepoKeyGrant {
 }
 
 impl RepoKeyGrant {
-    /// Build a grant tuple, normalizing both fingerprints so the canonical is
-    /// stable regardless of which Sequoia rendering the caller had.
+    /// Build a grant tuple for the repository `repo_uid`, normalizing both
+    /// fingerprints so the canonical is stable regardless of which Sequoia
+    /// rendering the caller had.
     pub fn new(
-        repo_id: impl Into<String>,
+        repo_uid: impl Into<String>,
         key_version: i32,
         recipient_fingerprint: &str,
         granter_fingerprint: &str,
@@ -172,7 +184,7 @@ impl RepoKeyGrant {
         timestamp_unix: i64,
     ) -> Self {
         RepoKeyGrant {
-            repo_id: repo_id.into(),
+            repo_uid: repo_uid.into(),
             key_version,
             recipient_fingerprint: normalize_fingerprint(recipient_fingerprint),
             granter_fingerprint: normalize_fingerprint(granter_fingerprint),
@@ -190,7 +202,7 @@ impl RepoKeyGrant {
     pub fn canonical(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(256);
         lp_push(&mut out, GRANT_CANONICAL_VERSION);
-        lp_push(&mut out, &self.repo_id);
+        lp_push(&mut out, &self.repo_uid);
         lp_push(&mut out, &self.key_version.to_string());
         lp_push(&mut out, &normalize_fingerprint(&self.recipient_fingerprint));
         lp_push(&mut out, &normalize_fingerprint(&self.granter_fingerprint));
@@ -201,7 +213,7 @@ impl RepoKeyGrant {
 
     /// The bytes the granter signs for this grant with `delegation` attached.
     /// `None` is exactly [`RepoKeyGrant::canonical`]; `Some` is the
-    /// `gc-grant-delegated-v1` canonical in the module docs, which binds every
+    /// `gc-grant-delegated-v2` canonical in the module docs, which binds every
     /// field of the delegation and its owner signature.
     pub fn canonical_with_delegation(&self, delegation: Option<&GrantDelegation>) -> Vec<u8> {
         let Some(del) = delegation else {
@@ -209,13 +221,13 @@ impl RepoKeyGrant {
         };
         let mut out = Vec::with_capacity(512);
         lp_push(&mut out, DELEGATED_GRANT_CANONICAL_VERSION);
-        lp_push(&mut out, &self.repo_id);
+        lp_push(&mut out, &self.repo_uid);
         lp_push(&mut out, &self.key_version.to_string());
         lp_push(&mut out, &normalize_fingerprint(&self.recipient_fingerprint));
         lp_push(&mut out, &normalize_fingerprint(&self.granter_fingerprint));
         lp_push(&mut out, &self.key_material_b64);
         lp_push(&mut out, &self.timestamp_unix.to_string());
-        lp_push(&mut out, &del.repo_id);
+        lp_push(&mut out, &del.repo_uid);
         lp_push(&mut out, &del.delegate_account);
         lp_push(&mut out, &del.delegate_fingerprint);
         lp_push(&mut out, &del.key_version.to_string());
@@ -236,8 +248,9 @@ impl RepoKeyGrant {
 /// [`GrantBundle::repo_delegation`] (both key-directory feature).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GrantDelegation {
-    /// The repository the delegation is for.
-    pub repo_id: String,
+    /// The repository the delegation is for: its immutable `repo_uid`, so a
+    /// rename does not void a delegation.
+    pub repo_uid: String,
     /// The delegate's account (lowercased), as in the delegation.
     pub delegate_account: String,
     /// The delegate's identity fingerprint (normalized) — must be the granter.
@@ -295,6 +308,15 @@ pub struct GrantBundle {
     /// Format discriminator. MUST equal [`GRANT_CANONICAL_VERSION`]; anything
     /// else is refused rather than guessed at.
     pub v: String,
+    /// The repository's immutable id the grant was signed for. Inside the
+    /// ciphertext, so the relay neither learns nor edits it, and covered by the
+    /// signature. Required: a bundle without one is refused by
+    /// [`GrantBundle::from_json`] (after its version check, so a retired v1
+    /// bundle is refused as the wrong version). The importer records it as the
+    /// repository's uid (and refuses a grant whose uid differs from one already
+    /// recorded).
+    #[serde(default)]
+    pub repo_uid: String,
     /// The granted repo key: base64 of the serialized TSK.
     pub key_material_b64: String,
     /// The granter's identity fingerprint (whose cert must verify `grant_sig_b64`).
@@ -312,20 +334,14 @@ pub struct GrantBundle {
 }
 
 impl GrantBundle {
-    /// Reconstruct the signed tuple from this bundle plus the two values only
-    /// the RECIPIENT knows independently (`repo_id`/`key_version` come from the
-    /// relayed grant envelope; `recipient_fingerprint` is the recipient's own
-    /// identity). Because those are supplied by the verifier rather than the
-    /// bundle, an attacker cannot re-aim a genuine grant by rewriting the
-    /// bundle — the tuple simply stops matching the signature.
-    pub fn to_grant(
-        &self,
-        repo_id: &str,
-        key_version: i32,
-        recipient_fingerprint: &str,
-    ) -> RepoKeyGrant {
+    /// Reconstruct the signed tuple from this bundle plus the values the
+    /// RECIPIENT supplies (`key_version` from the relayed grant envelope;
+    /// `recipient_fingerprint`, its own identity). The repository is the
+    /// bundle's own signed uid; whether that is the repository the caller meant
+    /// is [`verify_grant_bundle`]'s check.
+    pub fn to_grant(&self, key_version: i32, recipient_fingerprint: &str) -> RepoKeyGrant {
         RepoKeyGrant::new(
-            repo_id,
+            self.repo_uid.clone(),
             key_version,
             recipient_fingerprint,
             &self.granter_fingerprint,
@@ -376,77 +392,98 @@ impl GrantBundle {
                 bundle.v, GRANT_CANONICAL_VERSION
             )));
         }
+        if bundle.repo_uid.trim().is_empty() {
+            return Err(CryptoError::Decryption(
+                "grant bundle names no repo_uid; a gc-grant-v2 grant always binds one".to_string(),
+            ));
+        }
         Ok(bundle)
     }
 }
 
-/// Build a signed [`GrantBundle`] — the granter-side composition point.
+/// Build a signed [`GrantBundle`] for the repository `repo_uid` — the
+/// granter-side composition point. With a
+/// `delegation` (KTD-6) the granter's signature covers it too (see
+/// [`RepoKeyGrant::canonical_with_delegation`]).
 ///
-/// `granter_engine` MUST hold the granting owner's identity secret key.
-/// `key_material_b64` is base64 of the serialized TSK being granted.
-pub fn build_signed_grant_bundle(
+/// `granter_engine` MUST hold the granting identity's secret key.
+/// `key_material_b64` is base64 of the serialized TSK being granted. This does
+/// not check that a delegation authorizes the granter; the recipient decides
+/// that with `authorize_repo_grant`, and the owner's signer refuses a
+/// non-conforming delegation before it exists.
+#[allow(clippy::too_many_arguments)]
+pub fn build_signed_repo_grant_bundle(
     granter_engine: &EncryptionEngine,
-    repo_id: &str,
+    repo_uid: &str,
     key_version: i32,
     recipient_fingerprint: &str,
     key_material_b64: &str,
     timestamp_unix: i64,
+    delegation: Option<GrantDelegation>,
 ) -> Result<GrantBundle> {
+    use base64::Engine as _;
     let granter_fingerprint = normalize_fingerprint(&granter_engine.fingerprint());
     let grant = RepoKeyGrant::new(
-        repo_id,
+        repo_uid,
         key_version,
         recipient_fingerprint,
         &granter_fingerprint,
         key_material_b64,
         timestamp_unix,
     );
-    let grant_sig_b64 = sign_repo_key_grant(granter_engine, &grant)?;
+    let sig = granter_engine.sign_data(&grant.canonical_with_delegation(delegation.as_ref()))?;
     Ok(GrantBundle {
         v: GRANT_CANONICAL_VERSION.to_string(),
+        repo_uid: repo_uid.to_string(),
         key_material_b64: key_material_b64.to_string(),
         granter_fingerprint,
         timestamp_unix,
-        grant_sig_b64,
-        delegation: None,
+        grant_sig_b64: base64::engine::general_purpose::STANDARD.encode(sig),
+        delegation,
     })
 }
 
-/// Build a signed [`GrantBundle`] that carries an owner-signed delegation
-/// (KTD-6) — the delegate-side composition point. The granter's signature
-/// covers the delegation too (see [`RepoKeyGrant::canonical_with_delegation`]).
-///
-/// This does not check that the delegation authorizes the granter; the
-/// recipient decides that with `authorize_repo_grant`, and the owner's signer
-/// refuses a non-conforming delegation before it exists.
+/// [`build_signed_repo_grant_bundle`] with no delegation: an owner's grant of
+/// the repository `repo_uid`.
+pub fn build_signed_grant_bundle(
+    granter_engine: &EncryptionEngine,
+    repo_uid: &str,
+    key_version: i32,
+    recipient_fingerprint: &str,
+    key_material_b64: &str,
+    timestamp_unix: i64,
+) -> Result<GrantBundle> {
+    build_signed_repo_grant_bundle(
+        granter_engine,
+        repo_uid,
+        key_version,
+        recipient_fingerprint,
+        key_material_b64,
+        timestamp_unix,
+        None,
+    )
+}
+
+/// [`build_signed_repo_grant_bundle`] carrying `delegation` (KTD-6): a
+/// delegate's grant of the repository `repo_uid`.
 pub fn build_signed_delegated_grant_bundle(
     granter_engine: &EncryptionEngine,
-    repo_id: &str,
+    repo_uid: &str,
     key_version: i32,
     recipient_fingerprint: &str,
     key_material_b64: &str,
     timestamp_unix: i64,
     delegation: GrantDelegation,
 ) -> Result<GrantBundle> {
-    use base64::Engine as _;
-    let granter_fingerprint = normalize_fingerprint(&granter_engine.fingerprint());
-    let grant = RepoKeyGrant::new(
-        repo_id,
+    build_signed_repo_grant_bundle(
+        granter_engine,
+        repo_uid,
         key_version,
         recipient_fingerprint,
-        &granter_fingerprint,
         key_material_b64,
         timestamp_unix,
-    );
-    let sig = granter_engine.sign_data(&grant.canonical_with_delegation(Some(&delegation)))?;
-    Ok(GrantBundle {
-        v: GRANT_CANONICAL_VERSION.to_string(),
-        key_material_b64: key_material_b64.to_string(),
-        granter_fingerprint,
-        timestamp_unix,
-        grant_sig_b64: base64::engine::general_purpose::STANDARD.encode(sig),
-        delegation: Some(delegation),
-    })
+        Some(delegation),
+    )
 }
 
 /// Outcome of the recipient-side grant check. Every non-`Valid` variant means
@@ -503,6 +540,12 @@ impl GrantVerifyOutcome {
 /// granter whose cert is `granter_cert_armored`, for exactly this repo, version
 /// and recipient.
 ///
+/// `repo_uid` is the repository the caller means, by its immutable id, which
+/// survives a rename. A bundle signed for any other uid is a grant re-aimed at
+/// another repository and is refused as [`GrantVerifyOutcome::SignatureInvalid`],
+/// as a v1 re-aim was. A name is never a uid, so a caller that still passes
+/// one verifies nothing.
+///
 /// Fail-closed: anything other than [`GrantVerifyOutcome::Valid`] means do not
 /// import. Note this proves AUTHORSHIP, not AUTHORIZATION — the caller must
 /// still establish that the served granter cert is the real account's key (via the key directory)
@@ -511,7 +554,7 @@ pub fn verify_grant_bundle(
     bundle: &GrantBundle,
     granter_cert_armored: &str,
     granter_served_fingerprint: &str,
-    repo_id: &str,
+    repo_uid: &str,
     key_version: i32,
     recipient_fingerprint: &str,
 ) -> GrantVerifyOutcome {
@@ -521,7 +564,10 @@ pub fn verify_grant_bundle(
         return GrantVerifyOutcome::GranterFingerprintMismatch { claimed, served };
     }
 
-    let grant = bundle.to_grant(repo_id, key_version, recipient_fingerprint);
+    if repo_uid.is_empty() || bundle.repo_uid != repo_uid {
+        return GrantVerifyOutcome::SignatureInvalid;
+    }
+    let grant = bundle.to_grant(key_version, recipient_fingerprint);
     let verified = match &bundle.delegation {
         None => verify_repo_key_grant(granter_cert_armored, &grant, &bundle.grant_sig_b64),
         Some(del) => verify_signed_bytes(
@@ -579,8 +625,9 @@ mod tests {
     /// and recipient (every grant would fail to verify) — fail loudly here.
     #[test]
     fn golden_canonical_is_frozen() {
-        let g = RepoKeyGrant::new("r", 1, "AB", "CD", "V0s=", 1_750_000_000);
-        let expected = b"11:gc-grant-v1\n1:r\n1:1\n2:AB\n2:CD\n4:V0s=\n10:1750000000\n".to_vec();
+        let g = RepoKeyGrant::new("u", 1, "AB", "CD", "V0s=", 1_750_000_000);
+        let expected =
+            b"11:gc-grant-v2\n1:u\n1:1\n2:AB\n2:CD\n4:V0s=\n10:1750000000\n".to_vec();
         assert_eq!(g.canonical(), expected);
     }
 
@@ -594,7 +641,7 @@ mod tests {
 
         // ...even when the struct is built by literal rather than `new`.
         let literal = RepoKeyGrant {
-            repo_id: "r".to_string(),
+            repo_uid: "r".to_string(),
             key_version: 1,
             recipient_fingerprint: "aabb ccdd".to_string(),
             granter_fingerprint: "1122 3344".to_string(),
@@ -618,7 +665,7 @@ mod tests {
     fn every_field_is_bound_into_the_canonical() {
         let base = grant().canonical();
         let variants = [
-            RepoKeyGrant { repo_id: "mallory/other".to_string(), ..grant() },
+            RepoKeyGrant { repo_uid: "mallory/other".to_string(), ..grant() },
             RepoKeyGrant { key_version: 4, ..grant() },
             RepoKeyGrant { recipient_fingerprint: "0".repeat(40), ..grant() },
             RepoKeyGrant { granter_fingerprint: "0".repeat(40), ..grant() },
@@ -692,7 +739,7 @@ mod tests {
 
         for replay in [
             RepoKeyGrant { recipient_fingerprint: "9".repeat(40), ..g.clone() },
-            RepoKeyGrant { repo_id: "alice/other-repo".to_string(), ..g.clone() },
+            RepoKeyGrant { repo_uid: "alice/other-repo".to_string(), ..g.clone() },
             RepoKeyGrant { key_version: 4, ..g.clone() },
         ] {
             assert!(
@@ -749,9 +796,10 @@ mod tests {
         let err = GrantBundle::from_json(legacy_tsk).unwrap_err();
         assert!(format!("{err}").contains("not a gc-grant bundle"));
 
-        // A wrong version tag is refused too (never guessed at).
+        // A wrong version tag is refused too (never guessed at) — the retired
+        // v1 tag included.
         let wrong = serde_json::json!({
-            "v": "gc-grant-v2",
+            "v": "gc-grant-v1",
             "key_material_b64": KEY_B64,
             "granter_fingerprint": "AB",
             "timestamp_unix": 1,

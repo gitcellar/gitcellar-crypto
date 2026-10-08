@@ -1,0 +1,22 @@
+{
+  "_doc": "Published deterministic test vector for GitCellar chunk-format v3 (XChaCha20-Poly1305, 2026-10). A third party reproduces `chunk_hex` bit-for-bit from (content_key_hex, nonce_hex, plaintext_utf8, aad) with any XChaCha20-Poly1305 implementation, and reproduces content_key_hex from (k_repo_hex, content_key_info) with any HKDF-SHA256. The AEAD associated data is `aad.cipher_aad_hex` = format_version_byte(1) || repo_uid || 0x00 || chunk_name || 0x00 || key_version(u32 LE) || stream_offset(u64 LE) || size(u64 LE). repo_uid is the repository's immutable id (never its owner/name) and key_version is the repository key version that sealed the chunk; neither string field may contain 0x00. The AAD is NOT stored in the chunk; it only participates in the Poly1305 tag. Derived by derive_chunk_format_v3.py beside this file (independent of GitCellar code) and reproduced by vault-core's xchacha_published_test_vector_reproduces; never hand-edited.",
+  "format_version": 3,
+  "cipher": "XChaCha20-Poly1305",
+  "kdf": "HKDF-SHA256",
+  "content_key_info": "gitcellar/chunk-content/v1",
+  "chunk_layout": "[version_byte(1)] [XNonce(24)] [ciphertext(n)] [Poly1305 tag(16)]",
+  "aad_layout": "version_byte(1) || repo_uid || 0x00 || chunk_name || 0x00 || key_version(u32 LE) || stream_offset(u64 LE) || size(u64 LE)  (associated data only; not stored)",
+  "k_repo_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "content_key_hex": "5b726c08c23f259b845f13e1b2068a9c94349f775862a6c48f9c81192581ca6a",
+  "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+  "plaintext_utf8": "GitCellar chunk-format v3 published test vector",
+  "aad": {
+    "repo_uid": "5f0c9e7a2b1d4c3e8f6a0b9c7d2e1f30",
+    "chunk_name": "9f2c4e8a1b3d5f70e6c2a4881d3b5f7092e4c6a8b0d2f4e6182a3c4d5e6f7081",
+    "key_version": 2,
+    "stream_offset": 0,
+    "size": 47,
+    "cipher_aad_hex": "0335663063396537613262316434633365386636613062396337643265316633300039663263346538613162336435663730653663326134383831643362356637303932653463366138623064326634653631383261336334643565366637303831000200000000000000000000002f00000000000000"
+  },
+  "chunk_hex": "03404142434445464748494a4b4c4d4e4f5051525354555657e7faadae7864e7667958dbf2880ea3e7e81543dff055d0a12d46dfc1cb245d220b9ab3011aa1789fb690c213a89f1484202dc214642484c2c1ce6c465189f2"
+}

@@ -31,6 +31,10 @@ use zeroize::Zeroizing;
 pub struct EncryptionEngine {
     identity: Identity,
     policy: StandardPolicy<'static>,
+    /// The repository key version this engine's key is, when the caller told
+    /// it ([`Self::with_key_version`]). The batch chunk helpers bind it into
+    /// every chunk's AAD (chunk-format v3) and refuse to seal without it.
+    key_version: Option<u32>,
 }
 
 impl EncryptionEngine {
@@ -43,6 +47,7 @@ impl EncryptionEngine {
         Ok(Self {
             identity,
             policy: StandardPolicy::new(),
+            key_version: None,
         })
     }
 
@@ -71,7 +76,39 @@ impl EncryptionEngine {
         Ok(Self {
             identity,
             policy: StandardPolicy::new(),
+            key_version: None,
         })
+    }
+
+    /// This engine, as the repository key version `key_version` (versions start
+    /// at 1). The batch chunk helpers ([`Self::encrypt_chunks_e1_parallel`],
+    /// [`Self::encrypt_chunks_parallel`]) bind it into every chunk's AAD, so a
+    /// chunk they seal opens only under this version. A caller that seals
+    /// chunk by chunk passes the version in its own [`ChunkAad`] instead.
+    pub fn with_key_version(mut self, key_version: u32) -> Self {
+        self.key_version = Some(key_version);
+        self
+    }
+
+    /// The repository key version set by [`Self::with_key_version`], if any.
+    pub fn key_version(&self) -> Option<u32> {
+        self.key_version
+    }
+
+    /// The key version the batch helpers seal under. An engine that was never
+    /// told its version is refused rather than sealing under a guessed one:
+    /// binding the wrong version makes every chunk unopenable under the real
+    /// one, and binding version 1 for a rotated key is exactly that.
+    fn batch_key_version(&self) -> Result<u32> {
+        match self.key_version {
+            Some(v) if v >= 1 => Ok(v),
+            Some(v) => Err(CryptoError::Encryption(format!("invalid repository key version {v}"))),
+            None => Err(CryptoError::Encryption(
+                "this engine has no repository key version; build it with \
+                 EncryptionEngine::with_key_version before batch-sealing chunks"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Get the identity used by this engine
@@ -254,7 +291,7 @@ impl EncryptionEngine {
     //
     // Chunks are NO LONGER OpenPGP. The chunk data path is a single
     // XChaCha20-Poly1305 AEAD per chunk (vault-core `XChaChaChunkEngine`),
-    // emitting the versioned `[ver][24B nonce][ct][16B tag]` chunk-format-v1
+    // emitting the versioned `[ver][24B nonce][ct][16B tag]` chunk-format-v3
     // layout — no SEIPD packet, no ASCII armor (F3). OpenPGP (above) is retained
     // ONLY for identity/signing/key-wrap (`encrypt_data`/`decrypt_data`/
     // `sign_data`), never for chunk content.
@@ -401,8 +438,9 @@ impl EncryptionEngine {
     // purpose" rule): the provider receives none of them.
     //   id_key_repo       = HKDF(K_repo, "gitcellar/chunk-name/v1",   32)  → HMAC names (AC-E1.1)
     //   boundary_key_repo = HKDF(K_repo, "gitcellar/cdc-boundary/v1", 32)  → keyed Gear table (AC-E1.2)
-    // E1 chunks are tagged with F6 version byte v2 (same XChaCha20-Poly1305
-    // payload as v1; the marker records the keyed pipeline — AC-E1.6).
+    // Every chunk is F6 version byte v3, whose AAD binds the repository's
+    // immutable `repo_uid` and the sealing key version; the v2 keyed-pipeline
+    // marker is retired.
     // ========================================================================
 
     /// HKDF `info` for `id_key_repo` (keyed chunk naming; AC-E1.1/E1.5).
@@ -419,12 +457,15 @@ impl EncryptionEngine {
     /// per purpose"). The provider/storage backend never receives it.
     pub const OBJECT_KEY_PREFIX_INFO: &'static [u8] = b"gitcellar/object-key-prefix/v1";
 
-    /// Derive the **opaque storage object-key prefix segment** for `repo_id`
-    /// (P1-4b). Replaces the plaintext `{owner}/{name}` path segment so a bucket
-    /// `LIST` cannot enumerate repo identity.
+    /// Derive the **opaque storage object-key prefix segment** for the
+    /// repository `repo_uid` (P1-4b). Replaces the plaintext `{owner}/{name}`
+    /// path segment so a bucket `LIST` cannot enumerate repo identity.
     ///
-    /// `prefix = hex(HMAC-SHA256(id_key_repo_prefix, repo_id))`, where
+    /// `prefix = hex(HMAC-SHA256(id_key_repo_prefix, repo_uid))`, where
     /// `id_key_repo_prefix = HKDF-SHA256(K_repo, "gitcellar/object-key-prefix/v1")`.
+    /// The message is the repository's immutable `repo_uid`
+    /// (`"{repo_uid}.wiki"` for its wiki), never its `owner/name`, so a rename
+    /// or transfer leaves every object where it is.
     ///
     /// Properties inherited from [`derive_k_repo`](Self::derive_k_repo):
     /// - **Deterministic** per cert → the same prefix every time (list/delete/move
@@ -433,16 +474,14 @@ impl EncryptionEngine {
     /// - **Provider-opaque + non-reversible** — the HMAC key requires the X25519
     ///   secret scalar; the provider sees only the hex digest.
     ///
-    /// `repo_id` is the HMAC *message*, so a rename/transfer (different `repo_id`,
-    /// same cert) yields a different prefix — exactly why the storage layer
-    /// recomputes both old and new prefixes on a move. A key **rotation**
-    /// (different cert, same `repo_id`) also yields a different prefix; the
-    /// storage layer therefore tracks one prefix per key-version (active for
-    /// writes, all versions for read-fallback / list / delete / move sweeps).
-    pub fn derive_object_key_prefix(&self, repo_id: &str) -> Result<String> {
+    /// A key **rotation** (different cert, same `repo_uid`) yields a different
+    /// prefix; the storage layer therefore tracks one prefix per key-version
+    /// (active for writes, all versions for read-fallback / list / delete
+    /// sweeps).
+    pub fn derive_object_key_prefix(&self, repo_uid: &str) -> Result<String> {
         let k_repo = self.derive_k_repo()?;
         let id_key = Self::derive_e1_key(&*k_repo, Self::OBJECT_KEY_PREFIX_INFO)?;
-        Ok(object_key_prefix_hex(&id_key, repo_id))
+        Ok(object_key_prefix_hex(&id_key, repo_uid))
     }
 
     /// `HKDF-SHA256(K_repo, info, 32)` — one E1 sub-key. No salt; domain
@@ -470,30 +509,29 @@ impl EncryptionEngine {
         Ok(ChunkKeying::derive(&boundary_key, &id_key))
     }
 
-    /// The E1 chunk AEAD engine — identical XChaCha20-Poly1305 cipher as
-    /// [`chunk_engine`](Self::chunk_engine) but emits F6 version byte v2 to mark
-    /// the keyed pipeline (AC-E1.6).
+    /// The E1 chunk AEAD engine. Since chunk-format v3 there is one chunk
+    /// format, so this is [`chunk_engine`](Self::chunk_engine) pinned to v3.
     fn chunk_engine_e1(&self) -> Result<XChaChaChunkEngine> {
         let k_repo = self.derive_k_repo()?;
         XChaChaChunkEngine::new(&*k_repo)
-            .and_then(|e| e.with_format_version(ChunkFormatVersion::KeyedCdcNamingV2))
+            .and_then(|e| e.with_format_version(ChunkFormatVersion::RepoUidKeyVersionV3))
             .map_err(|e| CryptoError::Encryption(format!("E1 chunk cipher init failed: {}", e)))
     }
 
-    /// Build the H-1 identity AAD for a content chunk of `repo_id`: binds the
-    /// repo, the keyed HMAC chunk name, and the plaintext size. `stream_offset`
-    /// is fixed to 0 by [`ChunkAad::for_content_chunk`] because keyed-name
-    /// dedup stores one blob for many stream positions (see `ChunkAad` docs).
-    fn content_chunk_aad(repo_id: &str, chunk: &Chunk) -> ChunkAad {
-        ChunkAad::for_content_chunk(repo_id, &chunk.hash, chunk.size as u64)
+    /// Build the identity AAD for a content chunk of the repository `repo_uid`
+    /// for the batch helpers below: binds the uid, the keyed HMAC chunk name,
+    /// the engine's own key version ([`Self::with_key_version`]) and the
+    /// plaintext size. A NUL in the uid or the name is refused.
+    fn content_chunk_aad(repo_uid: &str, chunk: &Chunk, key_version: u32) -> Result<ChunkAad> {
+        ChunkAad::content(repo_uid, &chunk.hash, key_version, chunk.size as u64)
+            .map_err(|e| CryptoError::Encryption(format!("chunk AAD refused: {e}")))
     }
 
-    /// Encrypt an E1 chunk (XChaCha20-Poly1305, F6 v2), binding the chunk's
-    /// identity (`aad`) into the AEAD tag (H-1). The chunk's name is the keyed
-    /// HMAC produced upstream by the keyed `StreamChunker`; this step encrypts
-    /// content and authenticates identity. Decryptable by
-    /// [`decrypt_chunk`](Self::decrypt_chunk) under the SAME identity;
-    /// version-agnostic (v1|v2).
+    /// Encrypt an E1 chunk (XChaCha20-Poly1305, chunk-format v3), binding the
+    /// chunk's identity (`aad`) into the AEAD tag. The chunk's name is the
+    /// keyed HMAC produced upstream by the keyed `StreamChunker`; this step
+    /// encrypts content and authenticates identity. Decryptable by
+    /// [`decrypt_chunk`](Self::decrypt_chunk) under the SAME identity.
     pub fn encrypt_chunk_e1(&self, chunk: &Chunk, aad: &ChunkAad) -> Result<Vec<u8>> {
         let engine = self.chunk_engine_e1()?;
         engine
@@ -501,22 +539,23 @@ impl EncryptionEngine {
             .map_err(|e| CryptoError::Encryption(format!("E1 chunk encryption failed: {}", e)))
     }
 
-    /// Encrypt many E1 chunks of `repo_id` in parallel (XChaCha20-Poly1305,
-    /// F6 v2), each identity-bound via its own [`ChunkAad`] (H-1). Mirrors
-    /// [`encrypt_chunks_parallel`](Self::encrypt_chunks_parallel) with the v2
-    /// engine.
+    /// Encrypt many E1 chunks of the repository `repo_uid` in parallel
+    /// (XChaCha20-Poly1305, chunk-format v3), each identity-bound via its own
+    /// [`ChunkAad`] under this engine's key version ([`Self::with_key_version`];
+    /// an engine without one is refused).
     pub async fn encrypt_chunks_e1_parallel(
         &self,
-        repo_id: &str,
+        repo_uid: &str,
         chunks: &[Chunk],
     ) -> Result<Vec<Vec<u8>>> {
         info!("Encrypting {} E1 chunks in parallel", chunks.len());
+        let key_version = self.batch_key_version()?;
         let engine = Arc::new(self.chunk_engine_e1()?);
 
         let mut tasks = Vec::new();
         for chunk in chunks {
             let data = chunk.data.clone();
-            let aad = Self::content_chunk_aad(repo_id, chunk);
+            let aad = Self::content_chunk_aad(repo_uid, chunk, key_version)?;
             let engine = Arc::clone(&engine);
             tasks.push(tokio::task::spawn_blocking(move || {
                 engine.encrypt_with_aad(&data, &aad)
@@ -534,7 +573,7 @@ impl EncryptionEngine {
         Ok(encrypted_chunks)
     }
 
-    /// Encrypt a chunk with XChaCha20-Poly1305 (chunk-format v1), binding the
+    /// Encrypt a chunk with XChaCha20-Poly1305 (chunk-format v3), binding the
     /// chunk's identity (`aad`) into the AEAD tag (H-1).
     pub fn encrypt_chunk(&self, chunk: &Chunk, aad: &ChunkAad) -> Result<Vec<u8>> {
         debug!(
@@ -559,14 +598,16 @@ impl EncryptionEngine {
             .map_err(|e| CryptoError::Decryption(format!("Chunk decryption failed: {}", e)))
     }
 
-    /// Encrypt multiple chunks of `repo_id` in parallel (v1), each
-    /// identity-bound via its own [`ChunkAad`] (H-1).
+    /// Encrypt multiple chunks of the repository `repo_uid` in parallel (v3),
+    /// each identity-bound via its own [`ChunkAad`] under this engine's key
+    /// version ([`Self::with_key_version`]; an engine without one is refused).
     pub async fn encrypt_chunks_parallel(
         &self,
-        repo_id: &str,
+        repo_uid: &str,
         chunks: &[Chunk],
     ) -> Result<Vec<Vec<u8>>> {
         info!("Encrypting {} chunks in parallel", chunks.len());
+        let key_version = self.batch_key_version()?;
 
         // Derive the per-repo content key once; the cipher clones cheaply into
         // each blocking task (XChaCha20-Poly1305 is Send + Sync + Clone).
@@ -575,7 +616,7 @@ impl EncryptionEngine {
         let mut tasks = Vec::new();
         for chunk in chunks {
             let data = chunk.data.clone();
-            let aad = Self::content_chunk_aad(repo_id, chunk);
+            let aad = Self::content_chunk_aad(repo_uid, chunk, key_version)?;
             let engine = Arc::clone(&engine);
             tasks.push(tokio::task::spawn_blocking(move || {
                 engine.encrypt_with_aad(&data, &aad)
@@ -941,7 +982,7 @@ mod tests {
     }
 
     /// F2 (AC-F2.1/F2.5/F2.6) — a written chunk is the raw XChaCha20-Poly1305
-    /// v1 format, NOT an OpenPGP packet and NOT ASCII armor. This is the live
+    /// v3 format, NOT an OpenPGP packet and NOT ASCII armor. This is the live
     /// integration proof that the chunk write path no longer emits SEIPD/OpenPGP.
     #[test]
     fn live_chunk_is_raw_aead_not_openpgp() {
@@ -954,11 +995,11 @@ mod tests {
         };
         let out = engine.encrypt_chunk(&chunk, &aad_for(&chunk)).unwrap();
 
-        // byte[0] is the F6 version byte (== 1), not an OpenPGP packet tag.
+        // byte[0] is the F6 version byte (== 3), not an OpenPGP packet tag.
         // OpenPGP binary packet headers always have the high bit set (>= 0x80);
-        // ASCII-armored output starts with '-' (0x2d). v1 == 0x01 is neither, so
+        // ASCII-armored output starts with '-' (0x2d). v3 == 0x03 is neither, so
         // `gpg --list-packets` cannot parse a stored chunk (AC-F2.6).
-        assert_eq!(out[0], 1, "leading byte must be chunk-format version 1");
+        assert_eq!(out[0], 3, "leading byte must be chunk-format version 3");
         assert!(out[0] < 0x80, "must not look like an OpenPGP packet tag");
         assert_ne!(out[0], b'-', "must not be ASCII armor");
         // Size == plaintext + 41 (1 ver + 24 nonce + 16 tag), not plaintext×1.33 (F3).
@@ -992,16 +1033,17 @@ mod tests {
             );
         }
 
-        // L-1: a targeted flip to the OTHER VALID version byte (v1→v2) must
-        // also be rejected — the version byte is authenticated in the AAD, so
-        // this fails the tag rather than sneaking past the version parser.
-        let mut flipped = good.clone();
-        assert_eq!(flipped[0], 1);
-        flipped[0] = 2;
-        assert!(
-            engine.decrypt_chunk(&flipped, &aad).is_err(),
-            "v1→v2 version flip was not rejected (L-1)"
-        );
+        // L-1: a targeted flip to a retired version byte (v3→v1, v3→v2) must
+        // also be rejected.
+        for retired in [1u8, 2] {
+            let mut flipped = good.clone();
+            assert_eq!(flipped[0], 3);
+            flipped[0] = retired;
+            assert!(
+                engine.decrypt_chunk(&flipped, &aad).is_err(),
+                "v3→v{retired} version flip was not rejected (L-1)"
+            );
+        }
     }
 
     /// F2 — a different identity (different per-repo key) cannot decrypt: the
@@ -1062,11 +1104,11 @@ mod tests {
         assert_ne!(chunks_a[0].hash, ChunkEngine::compute_hash(&chunks_a[0].data));
     }
 
-    /// AC-E1.6 — `encrypt_chunk_e1` tags the chunk v2 (keyed pipeline), the
-    /// payload is XChaCha20-Poly1305, and the version-agnostic `decrypt_chunk`
-    /// round-trips it. v1 `encrypt_chunk` still tags v1 (F2 baseline unchanged).
+    /// Chunk-format v3: `encrypt_chunk` and `encrypt_chunk_e1` both emit v3 (the
+    /// v2 keyed-pipeline marker is retired), and `decrypt_chunk` round-trips
+    /// either.
     #[test]
-    fn e1_encrypt_chunk_is_v2_and_round_trips() {
+    fn e1_encrypt_chunk_is_v3_and_round_trips() {
         let engine = EncryptionEngine::new(create_test_identity()).unwrap();
         let chunk = Chunk {
             hash: "deadbeef".to_string(),
@@ -1075,25 +1117,23 @@ mod tests {
             offset: 0,
         };
         let aad = aad_for(&chunk);
-        let v1 = engine.encrypt_chunk(&chunk, &aad).unwrap();
-        let v2 = engine.encrypt_chunk_e1(&chunk, &aad).unwrap();
+        let plain = engine.encrypt_chunk(&chunk, &aad).unwrap();
+        let e1 = engine.encrypt_chunk_e1(&chunk, &aad).unwrap();
 
-        assert_eq!(v1[0], 1, "F2 baseline still emits v1");
-        assert_eq!(v2[0], 2, "E1 pipeline emits v2 (AC-E1.6)");
-        // Same plaintext+nonce-independent layout: both decrypt to the plaintext
-        // (decrypt authenticates against the OBSERVED version byte).
-        assert_eq!(engine.decrypt_chunk(&v1, &aad).unwrap(), chunk.data);
-        assert_eq!(engine.decrypt_chunk(&v2, &aad).unwrap(), chunk.data);
-        // v2 overhead is the F2 41-byte overhead (no extra E1 bytes in the chunk).
-        assert_eq!(v2.len(), chunk.data.len() + 41);
+        assert_eq!(plain[0], 3);
+        assert_eq!(e1[0], 3);
+        assert_eq!(engine.decrypt_chunk(&plain, &aad).unwrap(), chunk.data);
+        assert_eq!(engine.decrypt_chunk(&e1, &aad).unwrap(), chunk.data);
+        // The 41-byte F2 overhead (no extra bytes in the chunk).
+        assert_eq!(e1.len(), chunk.data.len() + 41);
     }
 
     /// End-to-end E1: keyed `StreamChunker` (HMAC names + keyed boundaries) →
-    /// `encrypt_chunks_e1_parallel` (v2) → `decrypt_chunks_parallel` →
+    /// `encrypt_chunks_e1_parallel` (v3) → `decrypt_chunks_parallel` →
     /// reassembles to the original bytes, all under this identity's keying.
     #[tokio::test]
     async fn e1_keyed_chunk_pipeline_round_trips_end_to_end() {
-        let engine = EncryptionEngine::new(create_test_identity()).unwrap();
+        let engine = EncryptionEngine::new(create_test_identity()).unwrap().with_key_version(1);
         let keying = engine.chunk_keying().unwrap();
 
         // ~600 KiB of high-entropy data so the keyed CDC produces several chunks.
@@ -1116,7 +1156,7 @@ mod tests {
             .encrypt_chunks_e1_parallel(TEST_REPO_ID, &chunks)
             .await
             .unwrap();
-        assert!(encrypted.iter().all(|c| c[0] == 2), "all E1 chunks are v2");
+        assert!(encrypted.iter().all(|c| c[0] == 3), "all E1 chunks are v3");
 
         let aads: Vec<ChunkAad> = chunks.iter().map(aad_for).collect();
         let decrypted = engine.decrypt_chunks_parallel(&encrypted, &aads).await.unwrap();
@@ -1395,7 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_encryption() {
         let identity = create_test_identity();
-        let engine = EncryptionEngine::new(identity).unwrap();
+        let engine = EncryptionEngine::new(identity).unwrap().with_key_version(1);
 
         let chunk_engine = ChunkEngine::new(ChunkConfig::default());
         let data = vec![42u8; 1024 * 1024]; // 1MB
@@ -1412,6 +1452,39 @@ mod tests {
             let dec = engine.decrypt_chunk(enc, &aad_for(&chunks[i])).unwrap();
             assert_eq!(dec, chunks[i].data);
         }
+    }
+
+    /// The public batch helpers seal under the engine's REAL key
+    /// version. A rotated key (version 3) sealed through them opens under
+    /// version 3's AAD and not under version 1's, which is what they bound
+    /// before; an engine never told its version is refused, not guessed at.
+    #[tokio::test]
+    async fn batch_helpers_bind_the_engines_key_version() {
+        let identity = create_test_identity();
+        let chunk_engine = ChunkEngine::new(ChunkConfig::default());
+        let chunks = chunk_engine.chunk_data(&vec![7u8; 64 * 1024]).unwrap();
+        let at = |v: u32, c: &Chunk| ChunkAad::content(TEST_REPO_ID, &c.hash, v, c.size as u64).unwrap();
+
+        let v3 = EncryptionEngine::new(identity.clone()).unwrap().with_key_version(3);
+        assert_eq!(v3.key_version(), Some(3));
+        for sealed in [
+            v3.encrypt_chunks_parallel(TEST_REPO_ID, &chunks).await.unwrap(),
+            v3.encrypt_chunks_e1_parallel(TEST_REPO_ID, &chunks).await.unwrap(),
+        ] {
+            for (enc, chunk) in sealed.iter().zip(&chunks) {
+                assert_eq!(v3.decrypt_chunk(enc, &at(3, chunk)).unwrap(), chunk.data);
+                assert!(
+                    v3.decrypt_chunk(enc, &at(1, chunk)).is_err(),
+                    "a chunk sealed by a version-3 engine must not open as version 1"
+                );
+            }
+        }
+
+        let unversioned = EncryptionEngine::new(identity).unwrap();
+        assert_eq!(unversioned.key_version(), None);
+        let err = unversioned.encrypt_chunks_parallel(TEST_REPO_ID, &chunks).await.unwrap_err();
+        assert!(err.to_string().contains("no repository key version"), "{err}");
+        assert!(unversioned.encrypt_chunks_e1_parallel(TEST_REPO_ID, &chunks).await.is_err());
     }
 
     #[test]

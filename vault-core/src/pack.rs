@@ -11,50 +11,71 @@
 //! Phase A — close the name-confirmation and boundary-reproduction oracles, but
 //! **not** the size channel.
 //!
-//! This module **narrows** the size channel with the **restic 0.18.0 pack
-//! model**: many encrypted chunks are concatenated into a larger **pack** blob
-//! and assigned to packs at random, so a stored object's size no longer maps to
-//! one chunk (AC-E1.4). It is the cheapest, highest-leverage size mitigation —
-//! near zero storage overhead, unlike power-of-two/constant-size padding
-//! (rejected for a storage-capped product; the optional
-//! tight-multiplicative-ladder pack-size quantization is a documented higher-tier
-//! add-on, not built here).
+//! This module **narrows** the size channel in two layers:
+//!
+//! 1. **Packing**, the **restic 0.18.0 pack model**: many encrypted chunks are
+//!    concatenated into a larger **pack** blob and assigned to packs at random,
+//!    so a stored object's size no longer maps to one chunk (AC-E1.4).
+//! 2. **Padding**: every pack is padded with
+//!    random filler to the smallest step of a geometric ladder at or above its
+//!    content: a 256 KiB floor ([`PAD_LADDER_FLOOR`]), then x1.25 per step
+//!    (256 KiB, 320 KiB, 400 KiB, 500 KiB, ...; [`PadLadder::DEFAULT`]).
+//!    Packing alone did not help an incremental push: a push packs only the
+//!    chunks new to it, so a one-chunk push stored one pack of exactly
+//!    `plaintext + 41` bytes, the exact chunk length the eprint 2025/558
+//!    attacks on secret-table Gear chunkers need. With the floor, every push
+//!    whose new chunks total under 256 KiB stores the same object size.
+//!
+//! ## What padding costs, and how the storage quota counts it
+//!
+//! Padding is storage the user pays for. The floor costs at most 256 KiB per
+//! pack, so at most 256 KiB for a push of under ~4 MiB of new chunks. Above the
+//! floor the ladder rounds a pack up by less than 25%
+//! (`padding_overhead_is_bounded_by_the_ladder` pins the bound). A pack
+//! holding more than 3.64 MiB, up to the 4 MiB target, lands on the 4.55 MiB
+//! step (4,768,370 bytes): about 14% over a pack filled exactly to the target.
+//!
+//! GitCellar's storage quota counts **stored object bytes**. A pack is stored
+//! padded, so **padding counts against the quota in full**, exactly as the
+//! per-chunk AEAD overhead does.
 //!
 //! ## What it does NOT close (be precise about this)
 //!
-//! Packing hides the **per-chunk** size sequence.
-//! It does not close the size channel, and this module must not be described as
-//! if it does — three residuals remain open by construction, and they are cheap
-//! for the provider to read:
+//! Packing hides the **per-chunk** size sequence and padding coarsens what is
+//! left. Together they do not close the size channel, and this module must
+//! not be described as if they do. These residuals remain open by
+//! construction:
 //!
-//! 1. **Total ciphertext bytes leak exactly.** Packing adds *zero* padding — that
-//!    is the near-zero-overhead property above, and `packing_adds_no_storage_overhead`
-//!    pins it as an equality. So the sum of a push's pack sizes is exactly
-//!    `sum(plaintext) + 41·n_chunks` (the per-chunk AEAD overhead,
-//!    `encryption.rs`), from which total plaintext size follows closely.
-//! 2. **The tail pack is a remainder, not "~target-sized".** [`pack_chunks`]
-//!    seals the open pack only when the next chunk would overflow the target and
-//!    flushes whatever is left at the end, so every batch ends with one
-//!    non-uniform pack of size `total_batch_bytes mod ~target` — a finer read on
-//!    the push size than any claim of uniformity would suggest.
-//! 3. **A repo smaller than one target is a single pack**, whose size simply *is*
-//!    that repo's ciphertext size. For the large population of small repos,
-//!    packing hides the per-chunk split and nothing else; against a candidate set
-//!    of known public repositories that is a usable confirmation channel.
+//! 1. **Total ciphertext bytes leak to ladder precision.** A pack's step
+//!    bounds its content to within 25% (below the floor, to "under 256 KiB"),
+//!    so a push's size, and a repository's growth, is readable in steps.
+//! 2. **The tail pack is a remainder.** [`pack_chunks`] seals the open pack
+//!    only when the next chunk would overflow the target and flushes whatever
+//!    is left at the end, so every batch ends with one pack that is not
+//!    target-sized; padding rounds it to a step, and the step still tracks the
+//!    remainder.
+//! 3. **A repo smaller than one target is a single pack**, whose step is that
+//!    repo's ciphertext size to ladder precision. Against a candidate set of
+//!    known public repositories that is a coarser, but still usable,
+//!    confirmation channel.
+//! 4. **Pack count and timing.** How many packs a push uploads, and when, is
+//!    visible and is not padded.
 //!
-//! Closing (1) and (3) needs padding or size quantization — the documented
-//! higher-tier add-on, deliberately not built here. The access-pattern residual
-//! is likewise open and documented (AC-E1.7). Recorded because this crate is
-//! published for third-party audit: an accurate residual list is worth more than
-//! a confident summary, and overclaiming in crypto prose is a failure mode this
-//! project has already shipped once (CG-1).
+//! The shipped chunker is a secret-table Gear CDC, the class eprint 2025/558
+//! analyses. Padding addresses the length observation that attack needs; the
+//! provable successor is the reserved v5 AES-per-byte keyed chunker. The
+//! access-pattern residual is likewise open and documented (AC-E1.7).
+//! Recorded because this crate is published for third-party audit: an
+//! accurate residual list is worth more than a confident summary, and
+//! overclaiming in crypto prose is a failure mode this project has already
+//! shipped once.
 //!
 //! ## What a pack is (and is not)
 //!
 //! A pack is an **opaque** concatenation of already-encrypted chunk blobs:
 //!
 //! ```text
-//! pack object  =  chunk_blob_0 ‖ chunk_blob_1 ‖ … ‖ chunk_blob_{k-1}
+//! pack object  =  chunk_blob_0 ‖ chunk_blob_1 ‖ … ‖ chunk_blob_{k-1} ‖ filler
 //! each chunk_blob_i = [ver(1)][nonce(24)][ciphertext(n)][tag(16)]   (its own AEAD unit)
 //! object key   =  repos/{repo_id}/packs/{pack_id}
 //! ```
@@ -63,9 +84,13 @@
 //! count, no offset table, no names. The map a reader needs
 //! (`chunk_name → {pack_id, offset, length}`) lives in the repo's **encrypted**
 //! manifest, never in the pack and never in plaintext at rest. The provider sees
-//! opaque blobs, most of them near the target size — but see "What it does NOT
-//! close" above: the sizes are neither uniform nor padded, and their sum is
-//! exact.
+//! opaque blobs whose sizes sit on ladder steps, but see "What it does NOT
+//! close" above.
+//!
+//! `filler` is random bytes that bring the object to its ladder step. Nothing
+//! marks where it starts: a reader addresses chunks by `{offset, length}` from
+//! the encrypted manifest and never reads past the last blob, so the filler is
+//! invisible to it and the read format is unchanged.
 //!
 //! Each chunk blob is self-contained and already version-tagged (F6 byte inside
 //! the blob), so packing is a pure **outer** layer: it never inspects, reframes,
@@ -106,6 +131,62 @@ use std::collections::HashSet;
 /// packs (it is an AEAD unit), so a chunk larger than the target gets its own
 /// pack; the target is therefore a soft ceiling, not a hard frame size.
 pub const DEFAULT_TARGET_PACK_SIZE: usize = 4 * 1024 * 1024;
+
+/// The smallest stored pack size (256 KiB): every pack whose content is at or
+/// below it is padded to exactly this length, so a one-chunk incremental push
+/// does not reveal its chunk's length.
+pub const PAD_LADDER_FLOOR: usize = 256 * 1024;
+
+/// A geometric ladder of allowed pack sizes: `floor`, then each step
+/// `growth_num / growth_den` times the last (integer division, so a step is
+/// never more than that ratio above the one before).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PadLadder {
+    /// The first step; content at or below it is padded to it.
+    pub floor: usize,
+    /// Numerator of the per-step growth ratio.
+    pub growth_num: usize,
+    /// Denominator of the per-step growth ratio.
+    pub growth_den: usize,
+}
+
+impl PadLadder {
+    /// The production ladder: 256 KiB, then x1.25 per step.
+    pub const DEFAULT: PadLadder =
+        PadLadder { floor: PAD_LADDER_FLOOR, growth_num: 5, growth_den: 4 };
+
+    /// The smallest ladder step at or above `len`.
+    ///
+    /// Every step after the floor is at most `growth_num / growth_den` times
+    /// the one before, and the one before is below `len`, so for `len` above
+    /// the floor the result is less than `len * growth_num / growth_den`.
+    pub fn step_for(&self, len: usize) -> usize {
+        let mut step = self.floor.max(1);
+        while step < len {
+            let next = (step as u128 * self.growth_num as u128 / self.growth_den.max(1) as u128)
+                .min(usize::MAX as u128) as usize;
+            // A ratio at or below 1 would never grow; move by one byte instead
+            // so the loop always ends.
+            step = if next > step { next } else { step + 1 };
+        }
+        step
+    }
+}
+
+/// Pad a finished pack with random filler up to its ladder step.
+///
+/// The filler sits after the last chunk blob. Readers address chunks by
+/// [`PackLocation`] and never read past the last blob, so filler changes no
+/// read. It is random rather than zero so that it is indistinguishable from
+/// the ciphertext before it.
+pub fn pad_pack<R: Rng + ?Sized>(bytes: &mut Vec<u8>, ladder: &PadLadder, rng: &mut R) {
+    let content = bytes.len();
+    let step = ladder.step_for(content);
+    if step > content {
+        bytes.resize(step, 0);
+        rng.fill_bytes(&mut bytes[content..]);
+    }
+}
 
 /// Length, in bytes, of a `pack_id` once hex-encoded (32 random bytes → 64 hex).
 pub const PACK_ID_HEX_LEN: usize = 64;
@@ -184,7 +265,9 @@ pub fn random_pack_id<R: Rng + ?Sized>(rng: &mut R) -> String {
 ///
 /// Returns a [`PackSet`]: the packs to upload and the `chunk_name → PackLocation`
 /// index for the encrypted manifest. A chunk is never split across packs; a chunk
-/// larger than `target_pack_size` occupies its own pack.
+/// larger than `target_pack_size` occupies its own pack. Every pack is padded
+/// with random filler to its [`PadLadder::DEFAULT`] step ([`pad_pack`]), so a
+/// pack's `bytes` are its chunk blobs followed by filler.
 ///
 /// `target_pack_size` of 0 is treated as 1 (each chunk its own pack) rather than
 /// an error, so callers cannot accidentally produce empty packs.
@@ -218,9 +301,11 @@ pub fn pack_chunks<R: Rng + ?Sized>(
         // target AND the pack already holds something (never seal an empty pack —
         // an oversized chunk still needs a home).
         if !cur_bytes.is_empty() && cur_bytes.len() + blob.len() > target {
+            let mut bytes = std::mem::take(&mut cur_bytes);
+            pad_pack(&mut bytes, &PadLadder::DEFAULT, rng);
             packs.push(BuiltPack {
                 pack_id: cur_id.take().expect("open pack has an id"),
-                bytes: std::mem::take(&mut cur_bytes),
+                bytes,
             });
         }
 
@@ -237,6 +322,7 @@ pub fn pack_chunks<R: Rng + ?Sized>(
     // Flush the final open pack.
     if let Some(pack_id) = cur_id.take() {
         if !cur_bytes.is_empty() {
+            pad_pack(&mut cur_bytes, &PadLadder::DEFAULT, rng);
             packs.push(BuiltPack {
                 pack_id,
                 bytes: cur_bytes,
@@ -373,12 +459,16 @@ mod tests {
         ];
         let ps = pack_chunks(chunks, 4096, &mut rng());
 
-        // The big chunk's pack holds exactly it.
+        // The big chunk's pack holds exactly it (plus filler to its step).
         let big_loc = &ps.index.iter().find(|(n, _)| *n == "a".repeat(64)).unwrap().1;
         let by_id: std::collections::HashMap<&str, &BuiltPack> =
             ps.packs.iter().map(|p| (p.pack_id.as_str(), p)).collect();
         let big_pack = by_id[big_loc.pack_id.as_str()];
-        assert_eq!(big_pack.size(), big.len(), "oversized chunk occupies its own pack");
+        let entries_in_big_pack =
+            ps.index.iter().filter(|(_, l)| l.pack_id == big_loc.pack_id).count();
+        assert_eq!(entries_in_big_pack, 1, "oversized chunk occupies its own pack");
+        assert_eq!(big_loc.offset, 0);
+        assert_eq!(big_pack.size(), PadLadder::DEFAULT.step_for(big.len()));
         assert_eq!(slice_chunk(&big_pack.bytes, big_loc).unwrap(), big.as_slice());
     }
 
@@ -414,19 +504,109 @@ mod tests {
         assert!(slice_chunk(&pack, &ok).is_ok());
     }
 
-    /// Total packed bytes equals the sum of unique chunk sizes — packing adds no
-    /// per-chunk storage overhead (near-zero cost, the AC-E1.4 rationale).
+    /// Padding is storage the user pays for, so its cost is pinned: a pack at
+    /// or under the floor stores exactly the floor, and a pack above it stores
+    /// less than 1.25x its content. (Replaces `packing_adds_no_storage_overhead`,
+    /// which pinned zero overhead and is false by design once packs are padded.)
     #[test]
-    fn packing_adds_no_storage_overhead() {
-        let chunks = fake_chunks(50, 800);
-        let total_in: usize = chunks.iter().map(|(_, b)| b.len()).sum();
-        let ps = pack_chunks(chunks, 4096, &mut rng());
-        let total_out: usize = ps.packs.iter().map(|p| p.size()).sum();
-        assert_eq!(total_in, total_out, "packs must hold exactly the chunk bytes, no padding");
+    fn padding_overhead_is_bounded_by_the_ladder() {
+        let ladder = PadLadder::DEFAULT;
+
+        // The ladder itself, across the range a pack can take: below the
+        // floor, around it, and well past the 4 MiB target (oversized chunks).
+        let mut probes: Vec<usize> = vec![0, 1, 41, PAD_LADDER_FLOOR - 1, PAD_LADDER_FLOOR];
+        let mut len = PAD_LADDER_FLOOR + 1;
+        while len < 64 * 1024 * 1024 {
+            probes.extend([len - 1, len, len + 1]);
+            len = len * 9 / 8 + 7;
+        }
+        for len in probes {
+            let step = ladder.step_for(len);
+            assert!(step >= len, "step {step} must hold content {len}");
+            if len <= PAD_LADDER_FLOOR {
+                assert_eq!(step, PAD_LADDER_FLOOR, "content {len} under the floor");
+            } else {
+                assert!(step * 4 < len * 5, "step {step} is 1.25x or more over content {len}");
+            }
+        }
+
+        // And the packs `pack_chunks` actually builds, small and large.
+        for (n, base, target) in [(50, 800, 4096), (300, 60_000, DEFAULT_TARGET_PACK_SIZE)] {
+            let chunks = fake_chunks(n, base);
+            let ps = pack_chunks(chunks, target, &mut rng());
+            for pack in &ps.packs {
+                let content: usize = ps
+                    .index
+                    .iter()
+                    .filter(|(_, l)| l.pack_id == pack.pack_id)
+                    .map(|(_, l)| l.length as usize)
+                    .sum();
+                assert_eq!(pack.size(), ladder.step_for(content), "pack sits on its ladder step");
+            }
+        }
+    }
+
+    /// Filler changes no read: every `PackLocation` still slices exactly its
+    /// blob out of a padded pack, and the padding is really there.
+    #[test]
+    fn pack_slices_still_open_after_padding() {
+        let mut chunks = fake_chunks(120, 30_000);
+        chunks.push(("e".repeat(64), vec![9u8; 5_000_000])); // oversized, own pack
+        let original: std::collections::HashMap<String, Vec<u8>> =
+            chunks.iter().cloned().collect();
+
+        let ps = pack_chunks(chunks, DEFAULT_TARGET_PACK_SIZE, &mut rng());
+        let by_id: std::collections::HashMap<&str, &BuiltPack> =
+            ps.packs.iter().map(|p| (p.pack_id.as_str(), p)).collect();
+        assert_eq!(ps.index.len(), original.len());
+
+        let mut padded_packs = 0;
+        for pack in &ps.packs {
+            let content_end = ps
+                .index
+                .iter()
+                .filter(|(_, l)| l.pack_id == pack.pack_id)
+                .map(|(_, l)| l.offset as usize + l.length as usize)
+                .max()
+                .expect("every pack holds a chunk");
+            if pack.size() > content_end {
+                padded_packs += 1;
+            }
+        }
+        assert!(padded_packs > 0, "the packs must actually carry filler");
+
+        for (name, loc) in &ps.index {
+            let pack = by_id[loc.pack_id.as_str()];
+            let sliced = slice_chunk(&pack.bytes, loc).unwrap();
+            assert_eq!(sliced, original[name].as_slice(), "chunk {name} did not slice back exactly");
+        }
+
+        // A lone chunk under the floor is padded and still opens.
+        let lone = vec![3u8; 777];
+        let ps = pack_chunks(vec![("f".repeat(64), lone.clone())], DEFAULT_TARGET_PACK_SIZE, &mut rng());
+        assert_eq!(ps.packs[0].size(), PAD_LADDER_FLOOR);
+        assert_eq!(slice_chunk(&ps.packs[0].bytes, &ps.index[0].1).unwrap(), lone.as_slice());
+    }
+
+    /// An incremental push of one chunk must not reveal that
+    /// chunk's exact length. Two one-chunk packs whose blobs differ by one byte,
+    /// both under the ladder floor, store as objects of equal length.
+    #[test]
+    fn single_chunk_packs_of_different_lengths_are_indistinguishable() {
+        let a = pack_chunks(vec![("a".repeat(64), vec![1u8; 5_000])], DEFAULT_TARGET_PACK_SIZE, &mut rng());
+        let b = pack_chunks(vec![("b".repeat(64), vec![2u8; 5_001])], DEFAULT_TARGET_PACK_SIZE, &mut rng());
+        assert_eq!(a.packs.len(), 1);
+        assert_eq!(b.packs.len(), 1);
+        assert_eq!(
+            a.packs[0].size(),
+            b.packs[0].size(),
+            "one-chunk packs under the floor must not reveal the chunk length"
+        );
     }
 
     /// All offsets/lengths within a pack are consistent: entries for a given pack
-    /// tile it without gaps or overlaps when sorted by offset.
+    /// tile it from offset 0 without gaps or overlaps when sorted by offset, and
+    /// only filler follows the last one (the pack is its content's ladder step).
     #[test]
     fn pack_entries_tile_their_pack_contiguously() {
         let chunks = fake_chunks(40, 600);
@@ -445,7 +625,11 @@ mod tests {
                 assert_eq!(l.offset, expected, "entries must tile the pack with no gap");
                 expected += l.length as u64;
             }
-            assert_eq!(expected as usize, pack.size(), "entries must cover the whole pack");
+            assert_eq!(
+                PadLadder::DEFAULT.step_for(expected as usize),
+                pack.size(),
+                "entries must cover the pack up to its filler"
+            );
         }
     }
 }

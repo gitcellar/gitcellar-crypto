@@ -5,7 +5,7 @@
 //! - **[`XChaChaChunkEngine`]** — the **single** chunk-encryption engine (F2).
 //!   XChaCha20-Poly1305 AEAD, 192-bit nonce (safe-by-construction — no
 //!   AES-GCM birthday footgun), per-repo content key via HKDF-SHA256. Emits the
-//!   versioned `[ver][24B nonce][ciphertext][16B tag]` chunk-format-v1 layout
+//!   versioned `[ver][24B nonce][ciphertext][16B tag]` chunk-format-v3 layout
 //!   ([`crate::chunk_format`]). This is the ONE chunk engine — the legacy
 //!   GPG-per-chunk engine was retired (R-1), so there is no ambiguous
 //!   dual-engine dead code.
@@ -36,11 +36,14 @@
 //!
 //! # Chunk identity binding (H-1 + L-1)
 //!
-//! Every chunk seal/open binds a [`crate::chunk_format::ChunkAad`] — repo id,
-//! keyed chunk name, offset, size — plus the format-version byte into the AEAD
-//! as associated data. A stored blob therefore only opens under the identity it
-//! was sealed with: splice/substitution and version-byte flips fail the
-//! Poly1305 tag. The AAD is not stored; only the tag value depends on it.
+//! Every chunk seal/open binds a [`crate::chunk_format::ChunkAad`] — the
+//! repository's immutable `repo_uid`, keyed chunk name, sealing key version,
+//! offset, size — plus the format-version byte into the AEAD as associated
+//! data. A stored blob therefore only opens under the identity it was sealed
+//! with: splice/substitution and version-byte flips fail the Poly1305 tag. The
+//! AAD is not stored; only the tag value depends on it. An AAD with a NUL byte
+//! in a string field is refused at seal and open (it would make the canonical
+//! encoding ambiguous).
 //!
 //! # Example: chunk encryption (F2 + H-1)
 //!
@@ -53,13 +56,14 @@
 //! let engine = XChaChaChunkEngine::new(&k_repo).unwrap();
 //!
 //! let plaintext = b"Hello, encrypted world!";
-//! let aad = ChunkAad::for_content_chunk("alice/repo", "chunk-name-hex", plaintext.len() as u64);
+//! // The repository's immutable id, the chunk's keyed name, the sealing key version, the size.
+//! let aad = ChunkAad::content("5f0c9e7a2b1d4c3e8f6a0b9c7d2e1f30", "chunk-name-hex", 1, plaintext.len() as u64).unwrap();
 //! let encrypted = engine.encrypt_with_aad(plaintext, &aad).unwrap(); // [ver][24B nonce][ct][16B tag]
 //! let decrypted = engine.decrypt_with_aad(&encrypted, &aad).unwrap();
 //! assert_eq!(plaintext.to_vec(), decrypted);
 //! ```
 
-use crate::chunk_format::{self, ChunkAad, ChunkFormatVersion, V1_XCHACHA20_POLY1305};
+use crate::chunk_format::{self, ChunkAad, ChunkFormatVersion, V3_REPO_UID_KEY_VERSION};
 use crate::chunking::Chunk;
 use crate::error::{VaultError, VaultResult};
 use aes_gcm::{
@@ -108,9 +112,9 @@ pub trait EncryptionEngine: Send + Sync {
 ///
 /// This is the **one** chunk-encryption engine (R-1 retired the GPG-per-chunk
 /// engine). It replaces the legacy OpenPGP-per-chunk path with a single modern
-/// AEAD per chunk and emits the versioned chunk-format-v1 layout.
+/// AEAD per chunk and emits the versioned chunk-format-v3 layout.
 ///
-/// # Wire format (chunk-format v1; [`crate::chunk_format`])
+/// # Wire format (chunk-format v3; [`crate::chunk_format`])
 ///
 /// ```text
 /// ┌────────┬──────────────┬───────────────┬──────────────┐
@@ -118,7 +122,8 @@ pub trait EncryptionEngine: Send + Sync {
 /// └────────┴──────────────┴───────────────┴──────────────┘
 /// ```
 ///
-/// `ver = 1` ([`V1_XCHACHA20_POLY1305`]). No OpenPGP packet, no ASCII armor
+/// `ver = 3` ([`V3_REPO_UID_KEY_VERSION`]); v1 and v2 are retired and refused.
+/// No OpenPGP packet, no ASCII armor
 /// (F3). Stored size = plaintext + 41 bytes (1 + 24 + 16), never plaintext×1.33.
 ///
 /// # Key derivation (AC-F2.2)
@@ -141,12 +146,8 @@ pub trait EncryptionEngine: Send + Sync {
 pub struct XChaChaChunkEngine {
     cipher: XChaCha20Poly1305,
     key_id: String,
-    /// The F6 version byte this engine emits (`byte[0]`). v1 (`F2` baseline) by
-    /// default; the E1 keyed pipeline sets v2 via [`with_format_version`]. The
-    /// cipher payload is identical either way; the byte records which pipeline
-    /// produced the chunk (AC-E1.6). Decrypt accepts both v1 and v2.
-    ///
-    /// [`with_format_version`]: XChaChaChunkEngine::with_format_version
+    /// The F6 version byte this engine emits (`byte[0]`): v3, the only
+    /// implemented format. Decrypt accepts v3 only.
     emit_version: u8,
 }
 
@@ -208,17 +209,13 @@ impl XChaChaChunkEngine {
         Ok(Self {
             cipher,
             key_id,
-            emit_version: V1_XCHACHA20_POLY1305,
+            emit_version: V3_REPO_UID_KEY_VERSION,
         })
     }
 
-    /// Set the F6 version byte this engine emits.
-    ///
-    /// `XChaCha20Poly1305V1` (default) is the F2 baseline; `KeyedCdcNamingV2` is
-    /// the E1 keyed-CDC/keyed-naming pipeline. Both emit the identical
-    /// XChaCha20-Poly1305 payload; only `byte[0]` differs (AC-E1.6). A version
-    /// without the XChaCha20-Poly1305 layout is rejected (this engine only
-    /// produces that layout).
+    /// Set the F6 version byte this engine emits. v3 is the only implemented
+    /// format; a version without the XChaCha20-Poly1305 layout is rejected
+    /// (this engine only produces that layout).
     pub fn with_format_version(mut self, version: ChunkFormatVersion) -> VaultResult<Self> {
         if !version.is_xchacha20_poly1305_layout() {
             return Err(VaultError::Encryption(format!(
@@ -232,13 +229,15 @@ impl XChaChaChunkEngine {
 
     /// The cipher-level AAD for a chunk: `version_byte(1) ‖ canonical_aad_bytes`
     /// (H-1 + L-1). On encrypt `version_byte` is the engine's emit-version; on
-    /// decrypt it is the OBSERVED `byte[0]`, so a v1↔v2 flip fails the tag.
-    fn cipher_aad(version_byte: u8, aad: &ChunkAad) -> Vec<u8> {
+    /// decrypt it is the OBSERVED `byte[0]`, so a flipped version byte fails
+    /// the tag. Refuses an AAD with a NUL in a string field ([`ChunkAad::check`]).
+    fn cipher_aad(version_byte: u8, aad: &ChunkAad) -> VaultResult<Vec<u8>> {
+        aad.check()?;
         let canonical = aad.canonical_aad_bytes();
         let mut out = Vec::with_capacity(1 + canonical.len());
         out.push(version_byte);
         out.extend_from_slice(&canonical);
-        out
+        Ok(out)
     }
 
     /// Encrypt with a caller-supplied nonce, binding `aad` (H-1).
@@ -252,7 +251,7 @@ impl XChaChaChunkEngine {
         nonce_bytes: &[u8; Self::NONCE_SIZE],
         aad: &ChunkAad,
     ) -> VaultResult<Vec<u8>> {
-        let cipher_aad = Self::cipher_aad(self.emit_version, aad);
+        let cipher_aad = Self::cipher_aad(self.emit_version, aad)?;
         let nonce = XNonce::from_slice(nonce_bytes);
         let ct_and_tag = self
             .cipher
@@ -266,7 +265,7 @@ impl XChaChaChunkEngine {
             .map_err(|e| VaultError::Encryption(format!("XChaCha20-Poly1305 encryption failed: {e}")))?;
 
         let mut out = Vec::with_capacity(Self::OVERHEAD + plaintext.len());
-        out.push(self.emit_version); // F6 version byte (v1 baseline / v2 E1 keyed pipeline)
+        out.push(self.emit_version); // F6 version byte (v3)
         out.extend_from_slice(nonce_bytes); // 24-byte XNonce
         out.extend_from_slice(&ct_and_tag); // ciphertext || 16-byte Poly1305 tag
         Ok(out)
@@ -301,7 +300,7 @@ impl XChaChaChunkEngine {
                 min
             )));
         }
-        let cipher_aad = Self::cipher_aad(data[0], aad);
+        let cipher_aad = Self::cipher_aad(data[0], aad)?;
         let nonce = XNonce::from_slice(&data[1..1 + Self::NONCE_SIZE]);
         let ct_and_tag = &data[1 + Self::NONCE_SIZE..];
         let plaintext = self
@@ -362,10 +361,8 @@ impl EncryptionEngine for XChaChaChunkEngine {
     fn decrypt(&self, data: &[u8]) -> VaultResult<Vec<u8>> {
         // F6: dispatch on the leading version byte. Unknown → explicit error.
         let version = chunk_format::version_of(data)?;
-        // v1 (F2 baseline) and v2 (E1 keyed pipeline) share the identical
-        // XChaCha20-Poly1305 payload, so both unwrap the same way. Any future
-        // non-XChaCha layout (e.g. an AES-256-GCM-SIV build variant) is rejected
-        // here rather than misparsed.
+        // Only v3 parses; any future non-XChaCha layout (e.g. an
+        // AES-256-GCM-SIV build variant) is rejected here rather than misparsed.
         if !version.is_xchacha20_poly1305_layout() {
             return Err(VaultError::Decryption(format!(
                 "chunk version 0x{:02x} is not an XChaCha20-Poly1305 layout; \
@@ -606,6 +603,7 @@ impl EncryptionEngine for AesEncryptionEngine {
     /// `EncryptionEngine` silently ignores the AAD. Its wire format has no
     /// version byte, so the cipher AAD is the bare canonical encoding.
     fn encrypt_chunk(&self, chunk: &Chunk, aad: &ChunkAad) -> VaultResult<Vec<u8>> {
+        aad.check()?;
         let cipher_aad = aad.canonical_aad_bytes();
         let mut nonce_bytes = [0u8; Self::NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -632,6 +630,7 @@ impl EncryptionEngine for AesEncryptionEngine {
                 "Ciphertext too short (missing nonce)".to_string(),
             ));
         }
+        aad.check()?;
         let cipher_aad = aad.canonical_aad_bytes();
         let (nonce_bytes, encrypted) = encrypted_data.split_at(Self::NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -665,28 +664,33 @@ mod tests {
     /// the exact chunk bytes from `(content_key, nonce, plaintext)` with any
     /// XChaCha20-Poly1305 implementation; the same `content_key` reproduces from
     /// `(K_repo, info)` with any HKDF-SHA256. Kept in lock-step with
-    /// `test-vectors/chunk-format-v1.json` (the publishable fixture).
+    /// `test-vectors/chunk-format-v3.json` (the publishable fixture).
     const TV_K_REPO_HEX: &str =
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const TV_NONCE_HEX: &str = "404142434445464748494a4b4c4d4e4f5051525354555657";
-    const TV_PLAINTEXT: &[u8] = b"GitCellar chunk-format v1 published test vector";
-    // H-1: the published vector binds a chunk identity as AAD, mirroring the
+    const TV_PLAINTEXT: &[u8] = b"GitCellar chunk-format v3 published test vector";
+    // The published vector binds a chunk identity as AAD, mirroring the
     // production seal path. Kept in lock-step with the fixture's `aad` object.
-    const TV_AAD_REPO_ID: &str = "alice/example-repo";
+    // The key version is 2, not the default 1, so the field is visibly bound.
+    const TV_AAD_REPO_UID: &str = "5f0c9e7a2b1d4c3e8f6a0b9c7d2e1f30";
     const TV_AAD_CHUNK_NAME: &str =
         "9f2c4e8a1b3d5f70e6c2a4881d3b5f7092e4c6a8b0d2f4e6182a3c4d5e6f7081";
+    const TV_AAD_KEY_VERSION: u32 = 2;
 
     fn tv_aad() -> ChunkAad {
-        ChunkAad::for_content_chunk(TV_AAD_REPO_ID, TV_AAD_CHUNK_NAME, TV_PLAINTEXT.len() as u64)
+        ChunkAad::content(TV_AAD_REPO_UID, TV_AAD_CHUNK_NAME, TV_AAD_KEY_VERSION, TV_PLAINTEXT.len() as u64)
+            .unwrap()
     }
 
     fn hex_to_vec(s: &str) -> Vec<u8> {
         hex::decode(s).expect("valid hex")
     }
 
+    const TEST_UID: &str = "aa11bb22cc33dd44ee55ff6600778899";
+
     /// A representative content-chunk AAD for tests.
     fn test_aad() -> ChunkAad {
-        ChunkAad::for_content_chunk("alice/proj", "cafe0123", 29)
+        ChunkAad::content(TEST_UID, "cafe0123", 1, 29).unwrap()
     }
 
     #[test]
@@ -710,13 +714,14 @@ mod tests {
 
     /// H-1 — the point of the fix: a chunk sealed under one identity fails
     /// authentication when opened under ANY other identity. Wrong repo, wrong
-    /// (spliced) chunk name, wrong offset, wrong size — each must be rejected
-    /// by the Poly1305 tag.
+    /// (spliced) chunk name, wrong key version, wrong offset, wrong size — each
+    /// must be rejected by the Poly1305 tag.
     #[test]
     fn xchacha_aad_identity_mismatch_is_rejected() {
         let engine = XChaChaChunkEngine::new(&[11u8; 32]).unwrap();
         let plaintext = b"identity-bound chunk content";
-        let good = ChunkAad::new("alice/proj", "cafe0123", 7, plaintext.len() as u64);
+        let len = plaintext.len() as u64;
+        let good = ChunkAad::new(TEST_UID, "cafe0123", 2, 7, len).unwrap();
         let chunk = engine.encrypt_with_aad(plaintext, &good).unwrap();
 
         // Positive control.
@@ -724,10 +729,11 @@ mod tests {
 
         // Each field mismatch fails closed.
         let wrong = [
-            ChunkAad::new("alice/other", "cafe0123", 7, plaintext.len() as u64), // wrong repo
-            ChunkAad::new("alice/proj", "beef4567", 7, plaintext.len() as u64),  // spliced name
-            ChunkAad::new("alice/proj", "cafe0123", 8, plaintext.len() as u64),  // wrong offset
-            ChunkAad::new("alice/proj", "cafe0123", 7, plaintext.len() as u64 + 1), // wrong size
+            ChunkAad::new("00000000000000000000000000000000", "cafe0123", 2, 7, len).unwrap(), // wrong repo
+            ChunkAad::new(TEST_UID, "beef4567", 2, 7, len).unwrap(), // spliced name
+            ChunkAad::new(TEST_UID, "cafe0123", 1, 7, len).unwrap(), // another key version
+            ChunkAad::new(TEST_UID, "cafe0123", 2, 8, len).unwrap(), // wrong offset
+            ChunkAad::new(TEST_UID, "cafe0123", 2, 7, len + 1).unwrap(), // wrong size
         ];
         for w in &wrong {
             let res = engine.decrypt_with_aad(&chunk, w);
@@ -748,9 +754,9 @@ mod tests {
         let plaintext = b"abcdefghij"; // 10 bytes
         let chunk = engine.encrypt_with_aad(plaintext, &test_aad()).unwrap();
 
-        // byte[0] is the F6 version byte = v1. The AAD is NOT stored — the
+        // byte[0] is the F6 version byte = v3. The AAD is NOT stored — the
         // on-disk layout is unchanged by H-1 (only the tag value differs).
-        assert_eq!(chunk[0], V1_XCHACHA20_POLY1305);
+        assert_eq!(chunk[0], V3_REPO_UID_KEY_VERSION);
         // Layout: 1 (ver) + 24 (nonce) + n (ct) + 16 (tag) == plaintext + 41.
         assert_eq!(chunk.len(), plaintext.len() + XChaChaChunkEngine::OVERHEAD);
         assert_eq!(XChaChaChunkEngine::OVERHEAD, 41);
@@ -804,40 +810,25 @@ mod tests {
         }
     }
 
-    /// L-1 — the targeted version-byte flip. The old tamper test only proved
-    /// `0x01 ^ 0xFF = 0xFE` is rejected (an UNKNOWN version — a parse error,
-    /// not a crypto check). v2 is a VALID version, so pre-fix a v1→v2 flip
-    /// decrypted cleanly. Post-fix the version byte is inside the AAD, so the
-    /// flip fails the Poly1305 tag — in BOTH directions.
+    /// L-1 — the version byte is authenticated, and only v3 parses. Flipping a
+    /// v3 chunk's byte to a retired version (1 or 2) is refused by the parser;
+    /// the cipher AAD composes the OBSERVED byte, so even a parser that let it
+    /// through would fail the Poly1305 tag.
     #[test]
-    fn xchacha_valid_version_flip_is_rejected() {
-        let k_repo = [5u8; 32];
-        let v1 = XChaChaChunkEngine::new(&k_repo).unwrap();
-        let v2 = XChaChaChunkEngine::new(&k_repo)
-            .unwrap()
-            .with_format_version(ChunkFormatVersion::KeyedCdcNamingV2)
-            .unwrap();
+    fn xchacha_version_flip_to_a_retired_version_is_rejected() {
+        let engine = XChaChaChunkEngine::new(&[5u8; 32]).unwrap();
         let aad = test_aad();
-        let pt = b"version byte is authenticated now";
-
-        // v1 → v2 flip.
-        let mut c1 = v1.encrypt_with_aad(pt, &aad).unwrap();
-        assert_eq!(c1[0], 1);
-        c1[0] = 2; // a VALID version byte — parses fine, must fail the tag
-        let res = v1.decrypt_with_aad(&c1, &aad);
-        match res {
-            Err(VaultError::Decryption(msg)) => assert!(
-                msg.contains("authentication failed"),
-                "v1→v2 flip must fail the AEAD tag, not a parse check: {msg}"
-            ),
-            other => panic!("v1→v2 flip must be rejected, got {other:?}"),
+        let pt = b"version byte is authenticated";
+        let good = engine.encrypt_with_aad(pt, &aad).unwrap();
+        assert_eq!(good[0], 3);
+        for retired in [1u8, 2] {
+            let mut flipped = good.clone();
+            flipped[0] = retired;
+            match engine.decrypt_with_aad(&flipped, &aad) {
+                Err(VaultError::Decryption(msg)) => assert!(msg.contains("retired"), "{msg}"),
+                other => panic!("v3→v{retired} flip must be rejected, got {other:?}"),
+            }
         }
-
-        // v2 → v1 flip.
-        let mut c2 = v2.encrypt_with_aad(pt, &aad).unwrap();
-        assert_eq!(c2[0], 2);
-        c2[0] = 1;
-        assert!(v2.decrypt_with_aad(&c2, &aad).is_err(), "v2→v1 flip must be rejected");
     }
 
     #[test]
@@ -858,48 +849,21 @@ mod tests {
         let engine = XChaChaChunkEngine::new(&[1u8; 32]).unwrap();
         let aad = test_aad();
         let mut chunk = engine.encrypt_with_aad(b"data", &aad).unwrap();
-        chunk[0] = 3; // reserved-but-unimplemented version (v3 hybrid-wrap)
+        chunk[0] = 6; // reserved-but-unimplemented version (v6 hybrid-wrap)
         assert!(engine.decrypt_with_aad(&chunk, &aad).is_err());
     }
 
-    /// AC-E1.6 (updated for H-1/L-1) — the E1 keyed pipeline tags chunks v2.
-    /// The version byte is now bound into the AEAD AAD, so a v1 and a v2 seal
-    /// of the same (plaintext, nonce, identity) share everything EXCEPT the
-    /// version byte and the Poly1305 tag — and each opens ONLY under its own
-    /// observed version.
+    /// The format-version setter accepts the one implemented format and emits it.
     #[test]
-    fn xchacha_v2_emit_and_decrypt_round_trips() {
-        let k_repo = [13u8; 32];
-        let v1 = XChaChaChunkEngine::new(&k_repo).unwrap();
-        let v2 = XChaChaChunkEngine::new(&k_repo)
+    fn xchacha_with_format_version_emits_v3() {
+        let engine = XChaChaChunkEngine::new(&[13u8; 32])
             .unwrap()
-            .with_format_version(ChunkFormatVersion::KeyedCdcNamingV2)
+            .with_format_version(ChunkFormatVersion::RepoUidKeyVersionV3)
             .unwrap();
-
-        let nonce = [0x41u8; XChaChaChunkEngine::NONCE_SIZE];
-        let pt = b"E1 keyed pipeline chunk";
         let aad = test_aad();
-        let c1 = v1.encrypt_with_nonce(pt, &nonce, &aad).unwrap();
-        let c2 = v2.encrypt_with_nonce(pt, &nonce, &aad).unwrap();
-
-        // Version bytes differ; the ciphertext body (same key/nonce/plaintext)
-        // is identical; the TAG differs because the version byte is in the AAD
-        // (L-1: the byte is now authenticated, not free-floating).
-        assert_eq!(c1[0], 1);
-        assert_eq!(c2[0], 2);
-        let body = 1 + XChaChaChunkEngine::NONCE_SIZE..c1.len() - XChaChaChunkEngine::TAG_SIZE;
-        assert_eq!(c1[body.clone()], c2[body]);
-        assert_ne!(
-            c1[c1.len() - XChaChaChunkEngine::TAG_SIZE..],
-            c2[c2.len() - XChaChaChunkEngine::TAG_SIZE..],
-            "tags must differ — the version byte is authenticated"
-        );
-
-        // Decrypt keys off the OBSERVED version byte, so either engine opens
-        // either version (the emit_version only affects sealing).
-        assert_eq!(v1.decrypt_with_aad(&c2, &aad).unwrap(), pt.to_vec());
-        assert_eq!(v2.decrypt_with_aad(&c1, &aad).unwrap(), pt.to_vec());
-        assert_eq!(v2.decrypt_with_aad(&c2, &aad).unwrap(), pt.to_vec());
+        let c = engine.encrypt_with_aad(b"E1 keyed pipeline chunk", &aad).unwrap();
+        assert_eq!(c[0], 3);
+        assert_eq!(engine.decrypt_with_aad(&c, &aad).unwrap(), b"E1 keyed pipeline chunk".to_vec());
     }
 
     #[test]
@@ -988,21 +952,22 @@ mod tests {
             size: 8,
             offset: 0,
         };
-        let aad = ChunkAad::for_content_chunk("alice/proj", &chunk.hash, chunk.size as u64);
+        let aad = ChunkAad::content(TEST_UID, &chunk.hash, 1, chunk.size as u64).unwrap();
         let enc = engine.encrypt_chunk(&chunk, &aad).unwrap();
         assert_eq!(engine.decrypt_chunk(&enc, &aad).unwrap(), chunk.data);
         // Opening under a different repo's identity fails closed.
-        let other = ChunkAad::for_content_chunk("bob/proj", &chunk.hash, chunk.size as u64);
+        let other =
+            ChunkAad::content("ffffffffffffffffffffffffffffffff", &chunk.hash, 1, chunk.size as u64).unwrap();
         assert!(engine.decrypt_chunk(&enc, &other).is_err());
     }
 
     /// AC-F2.4 — the published, deterministic test vector reproduces bit-for-bit.
-    /// Asserts the engine matches `test-vectors/chunk-format-v1.json`, the
+    /// Asserts the engine matches `test-vectors/chunk-format-v3.json`, the
     /// publishable fixture (E3 AC-E3.3 consumer).
     #[test]
     fn xchacha_published_test_vector_reproduces() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../test-vectors/chunk-format-v1.json"))
+            serde_json::from_str(include_str!("../test-vectors/chunk-format-v3.json"))
                 .expect("fixture parses");
 
         let k_repo = hex_to_vec(fixture["k_repo_hex"].as_str().unwrap());
@@ -1017,8 +982,10 @@ mod tests {
         assert_eq!(k_repo, hex_to_vec(TV_K_REPO_HEX));
         assert_eq!(nonce_v, hex_to_vec(TV_NONCE_HEX));
         assert_eq!(plaintext, TV_PLAINTEXT);
-        assert_eq!(fx_aad["repo_id"].as_str().unwrap(), TV_AAD_REPO_ID);
+        assert_eq!(fixture["format_version"].as_u64().unwrap(), 3);
+        assert_eq!(fx_aad["repo_uid"].as_str().unwrap(), TV_AAD_REPO_UID);
         assert_eq!(fx_aad["chunk_name"].as_str().unwrap(), TV_AAD_CHUNK_NAME);
+        assert_eq!(fx_aad["key_version"].as_u64().unwrap(), TV_AAD_KEY_VERSION as u64);
         assert_eq!(fx_aad["stream_offset"].as_u64().unwrap(), 0);
         assert_eq!(fx_aad["size"].as_u64().unwrap(), TV_PLAINTEXT.len() as u64);
 
@@ -1028,7 +995,7 @@ mod tests {
 
         // Step 2: the published cipher-AAD bytes == version_byte ‖ canonical(ChunkAad) (H-1).
         let aad = tv_aad();
-        let mut cipher_aad = vec![V1_XCHACHA20_POLY1305];
+        let mut cipher_aad = vec![V3_REPO_UID_KEY_VERSION];
         cipher_aad.extend_from_slice(&aad.canonical_aad_bytes());
         assert_eq!(cipher_aad, expected_cipher_aad, "published cipher-AAD mismatch");
 
@@ -1046,7 +1013,7 @@ mod tests {
 
     /// One-shot generator for the published fixture. Ignored by default; run with
     /// `cargo test -p vault-core gen_published_test_vector -- --ignored --nocapture`
-    /// to (re)materialize `test-vectors/chunk-format-v1.json`. Kept in-tree so the
+    /// to print the values of `test-vectors/chunk-format-v3.json`. Kept in-tree so the
     /// fixture is reproducible from source, never hand-edited.
     #[test]
     #[ignore]
@@ -1057,7 +1024,7 @@ mod tests {
         nonce.copy_from_slice(&hex_to_vec(TV_NONCE_HEX));
         let engine = XChaChaChunkEngine::from_content_key(&content_key).unwrap();
         let aad = tv_aad();
-        let mut cipher_aad = vec![V1_XCHACHA20_POLY1305];
+        let mut cipher_aad = vec![V3_REPO_UID_KEY_VERSION];
         cipher_aad.extend_from_slice(&aad.canonical_aad_bytes());
         let chunk = engine.encrypt_with_nonce(TV_PLAINTEXT, &nonce, &aad).unwrap();
         println!("content_key_hex = {}", hex::encode(content_key));

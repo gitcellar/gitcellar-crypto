@@ -14,9 +14,17 @@
 //!   `gear[i] = first-64-bits(BLAKE3_keyed(boundary_key_repo, "gear-table" ‖ LE32(i)))`.
 //!   A different `boundary_key_repo` yields different cut points on identical
 //!   input, so the storage provider cannot reproduce chunk boundaries or
-//!   fingerprint plaintext structure from them. This is **not** an algebraic
-//!   seed (no 32-bit `chunk_seed`, no secret Rabin polynomial — the
-//!   eprint-2025/558-broken designs are explicitly rejected, AC-E1.3).
+//!   fingerprint plaintext structure from them. It is a full 256-entry keyed
+//!   table, not a 32-bit `chunk_seed` or a secret Rabin polynomial (AC-E1.3).
+//!   It is still a **secret-table Gear chunker, the class eprint 2025/558
+//!   analyses**: an adversary who observes exact chunk lengths can learn
+//!   about the table and, from it, the content. Nothing in this module closes
+//!   that. What limits it is upstream of the chunker: packs and the stream
+//!   manifest are padded to a geometric ladder ([`crate::pack::PadLadder`]),
+//!   so the provider sees lengths only to ladder precision.
+//!   What remains after padding is coarse lengths and timing. The provable
+//!   successor is the reserved chunk-format v5 AES-per-byte keyed chunker
+//!   (`chunk_format`, AC-E1.8), post-launch.
 //! - **Keyed naming (AC-E1.1)** — the chunk object name becomes
 //!   `HMAC-SHA256(id_key_repo, plaintext_chunk)` instead of a bare
 //!   `SHA-256(plaintext)`. Same plaintext + same repo key → identical name
@@ -175,6 +183,28 @@ impl ChunkKeying {
         mac.update(data);
         format!("{:x}", mac.finalize().into_bytes())
     }
+
+    /// Whether `name` is `HMAC-SHA256(id_key_repo, plaintext)`, compared in
+    /// constant time (`Mac::verify_slice`). A `name` that is not 64 hex digits
+    /// never verifies. See [`ChunkEngine::verify_name`].
+    pub fn verify_name(&self, name: &str, plaintext: &[u8]) -> bool {
+        let Some(expected) = decode_name(name) else {
+            return false;
+        };
+        let mut mac =
+            HmacSha256::new_from_slice(&self.id_key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(plaintext);
+        mac.verify_slice(&expected).is_ok()
+    }
+}
+
+/// A chunk name as its 32 raw bytes: exactly 64 hex digits, else `None`.
+fn decode_name(name: &str) -> Option<[u8; 32]> {
+    if name.len() != 64 {
+        return None;
+    }
+    let bytes = hex::decode(name).ok()?;
+    bytes.try_into().ok()
 }
 
 /// Configuration for the chunking algorithm
@@ -443,8 +473,30 @@ impl ChunkEngine {
     /// # Returns
     /// true if the chunk's recomputed name matches its stored name.
     pub fn verify_chunk(&self, chunk: &Chunk) -> bool {
-        let computed = self.name(&chunk.data);
-        computed == chunk.hash
+        self.verify_name(&chunk.hash, &chunk.data)
+    }
+
+    /// Whether `name` is this engine's name for `plaintext` — the keyed
+    /// `HMAC-SHA256(id_key_repo, plaintext)` when keyed (E1), the unkeyed
+    /// `SHA-256` otherwise — compared in constant time.
+    ///
+    /// This is the reader's name check: after a content
+    /// chunk decrypts, the reader recomputes its name and compares it with the
+    /// owner-signed manifest entry's name. Passing it with substituted content
+    /// needs a plaintext whose keyed hash equals a given value — a preimage,
+    /// even for someone who holds `id_key_repo`.
+    pub fn verify_name(&self, name: &str, plaintext: &[u8]) -> bool {
+        match &self.keying {
+            Some(k) => k.verify_name(name, plaintext),
+            None => {
+                let Some(expected) = decode_name(name) else {
+                    return false;
+                };
+                let actual: [u8; 32] = Sha256::digest(plaintext).into();
+                // Constant-time: fold every byte's difference before deciding.
+                expected.iter().zip(actual.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+            }
+        }
     }
 
     /// Verify all chunks in a list
@@ -632,6 +684,24 @@ mod tests {
                 (x.wrapping_mul(0x2545F4914F6CDD1D) >> 33) as u8
             })
             .collect()
+    }
+
+    /// The reader re-checks that a decrypted content chunk's keyed
+    /// name is the manifest entry's name. A plaintext with another name, even
+    /// one that opened under the right key and AAD, is refused.
+    #[test]
+    fn verify_name_rejects_a_plaintext_with_another_name() {
+        let engine = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), keying_a());
+        let genuine = b"the genuine chunk".to_vec();
+        let name = engine.chunk_data(&genuine).unwrap()[0].hash.clone();
+        assert!(engine.verify_name(&name, &genuine));
+        assert!(!engine.verify_name(&name, b"a substituted chunk"));
+        // The same plaintext under another repository's naming key is another name.
+        let other = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), keying_b());
+        assert!(!other.verify_name(&name, &genuine));
+        // A malformed name never verifies.
+        assert!(!engine.verify_name("not-hex", &genuine));
+        assert!(!engine.verify_name(&name[..10], &genuine));
     }
 
     #[test]

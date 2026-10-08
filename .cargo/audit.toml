@@ -1,0 +1,13 @@
+# cargo-audit configuration (read by `cargo audit` and the CI audit job).
+# Every ignore names why the advisory cannot reach this code, and what ends it.
+
+[advisories]
+ignore = [
+    # rsa: Marvin Attack, a timing side channel in RSA private-key decryption.
+    # No fixed rsa release exists. It is in the lockfile only because
+    # jsonwebtoken 10's pure-Rust `rust_crypto` backend depends on it.
+    # passkey-core signs and verifies its tokens with a shared secret (HMAC)
+    # and never makes an RSA key, so no RSA private-key operation runs.
+    # Remove this line when rsa ships a fix or jsonwebtoken stops depending on it.
+    "RUSTSEC-2023-0071",
+]

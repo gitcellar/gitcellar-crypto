@@ -40,26 +40,29 @@ C bindings and a .NET wrapper for that reason.
 ### Rust
 
 ```rust
-use vault_core::{ChunkEngine, ChunkConfig, XChaChaChunkEngine, EncryptionEngine};
+use vault_core::{ChunkAad, ChunkConfig, ChunkEngine, ChunkKeying, EncryptionEngine, XChaChaChunkEngine};
+use vault_core::storage::{FileStorage, StorageBackend};
 
-// 1. Create chunks
-let chunker = ChunkEngine::new(ChunkConfig::default());
+// Per-repo keys. In GitCellar each is HKDF-SHA256(K_repo, <its own info string>);
+// gitcellar-crypto's `EncryptionEngine::chunk_keying` derives the two below.
+let keying = ChunkKeying::derive(&boundary_key_repo, &id_key_repo); // both &[u8; 32]
+let sealer = XChaChaChunkEngine::new(&k_repo)?; // content key = HKDF(K_repo, "gitcellar/chunk-content/v1")
+
+// 1. Keyed content-defined chunking: per-repo boundaries, HMAC-SHA256 chunk names
+let chunker = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), keying);
 let data = std::fs::read("large_file.bin")?;
 let chunks = chunker.chunk_data(&data)?;
 
-// 2. Seal each chunk (XChaCha20-Poly1305; content key derived from the
-//    per-repo root key via HKDF-SHA256)
-let encryptor = XChaChaChunkEngine::new(&k_repo)?;   // k_repo: &[u8; 32]
-
-for chunk in &chunks {
-    let encrypted = encryptor.encrypt_chunk(chunk, &aad)?;
-    // Store encrypted chunk... wire format: [version(1)][nonce(24)][ciphertext][tag(16)]
-}
-
-// 3. Upload to cloud (example with FileStorage for testing)
-use vault_core::storage::{FileStorage, StorageBackend};
+// 2. Seal each chunk (chunk format v3), bound to the repository's immutable id,
+//    the chunk's name, the repository key version and the plaintext size
 let storage = FileStorage::new("/tmp/vault")?;
-storage.upload("chunks/abc123", &encrypted).await?;
+for chunk in &chunks {
+    let aad = ChunkAad::content(repo_uid, &chunk.hash, key_version, chunk.size as u64)?;
+    let sealed = sealer.encrypt_chunk(chunk, &aad)?; // [3][nonce(24)][ciphertext][tag(16)]
+
+    // 3. Store it (FileStorage for testing; S3Storage for B2, Wasabi, AWS, MinIO)
+    storage.upload(&format!("chunks/{}", chunk.hash), &sealed).await?;
+}
 ```
 
 ### C# (.NET)
@@ -169,9 +172,14 @@ vault-core = { path = "...", features = ["ffi"] }
 ### Chunking
 
 ```rust
-// Content-defined chunking
-let chunker = ChunkEngine::new(ChunkConfig::default());
+// Keyed content-defined chunking — the repository path. Boundaries come from a
+// per-repo secret Gear table and names are HMAC-SHA256(id_key_repo, chunk).
+let chunker = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), keying);
 let chunks = chunker.chunk_data(&data)?;
+
+// Unkeyed: a public table and bare SHA-256 names, which let anyone who can
+// guess the content confirm it from the names. Not for repository data.
+let unkeyed = ChunkEngine::new(ChunkConfig::default());
 
 // Custom chunk sizes
 let config = ChunkConfig::new(
@@ -190,11 +198,12 @@ assert!(chunker.verify_chunk(&chunk));
 ### Encryption
 
 ```rust
-// Chunk sealing — XChaCha20-Poly1305 (the single chunk engine)
-use vault_core::encryption::XChaChaChunkEngine;
-let engine = XChaChaChunkEngine::new(&k_repo)?;         // k_repo: &[u8; 32]
-let sealed = engine.encrypt_chunk(&chunk, &aad)?;       // [version(1)][nonce(24)][ct][tag(16)]
-let opened = engine.decrypt_chunk(&sealed, &aad)?;      // fails closed on identity mismatch
+// Chunk sealing — XChaCha20-Poly1305, chunk format v3 (the single chunk engine)
+use vault_core::{ChunkAad, EncryptionEngine, XChaChaChunkEngine};
+let engine = XChaChaChunkEngine::new(&k_repo)?;         // k_repo: the per-repo root key
+let aad = ChunkAad::content(repo_uid, &chunk.hash, key_version, chunk.size as u64)?;
+let sealed = engine.encrypt_chunk(&chunk, &aad)?;       // [3][nonce(24)][ct][tag(16)]
+let opened = engine.decrypt_chunk(&sealed, &aad)?;      // fails closed on identity or version mismatch
 
 // AES passphrase/FFI helper (AES-256-GCM; .gckey / FFI — NOT the chunk path)
 use vault_core::encryption::AesEncryptionEngine;
@@ -237,11 +246,16 @@ storage.delete("path/to/file").await?;
 ### Sealed Chunk (XChaCha20-Poly1305)
 
 ```
-[version: 1 byte][nonce: 24 bytes][ciphertext][auth_tag: 16 bytes]
+[version: 1 byte = 3][nonce: 24 bytes][ciphertext][auth_tag: 16 bytes]
 ```
 
-Overhead is a flat 41 bytes per chunk. The chunk's identity — repository, chunk
-name, size — is authenticated as associated data rather than stored in the blob.
+Overhead is a flat 41 bytes per chunk. The chunk's identity is authenticated as
+associated data rather than stored in the blob: the version byte, then the
+canonical encoding of the repository's immutable id (`repo_uid`), the chunk name,
+the repository key version, the stream offset (always 0, so a deduplicated chunk
+stays valid at every position) and the plaintext size. Versions 1 and 2 are
+retired and refused. `test-vectors/chunk-format-v3.json` publishes a worked
+example, and `test-vectors/derive_chunk_format_v3.py` re-derives it in Python with no GitCellar code.
 
 ### AES Encrypted Data (passphrase/FFI helper)
 
@@ -262,11 +276,11 @@ name, size — is authenticated as associated data rather than stored in the blo
 ## Security
 
 - **XChaCha20-Poly1305 for chunks**: authenticated encryption with a 256-bit content key and a 192-bit random nonce, so nonce collisions are a non-concern at any realistic chunk count
-- **Identity binding**: each chunk is sealed against its own associated data, so a spliced, substituted, or wrong-repository blob fails authentication instead of decrypting
+- **Identity binding**: each chunk is sealed against its own associated data — repository id, chunk name, key version, size — so a spliced, substituted, wrong-repository or wrong-key-version blob fails authentication instead of decrypting
 - **HKDF-SHA256**: per-repo content-key derivation with a domain-separated info string
 - **AES-256-GCM for the passphrase/FFI helper**: authenticated encryption with 256-bit keys and a fresh 96-bit nonce per payload
 - **Argon2id**: OWASP-recommended parameters for passphrase key derivation
-- **Content-based hashing**: keyed HMAC-SHA256 chunk names (SHA-256 when unkeyed)
+- **Content-based naming**: keyed HMAC-SHA256 chunk names on the repository path (bare SHA-256 only on the unkeyed chunker)
 - **No key storage**: keys are provided by the caller, never stored
 
 ## Thread Safety
@@ -275,6 +289,7 @@ All types are `Send + Sync` and can be safely used from multiple threads:
 
 ```rust
 let engine = Arc::new(XChaChaChunkEngine::new(&k_repo)?);
+// (`aad` as above: ChunkAad::content(repo_uid, &chunk.hash, key_version, size))
 
 // Safe to clone and use across threads
 let engine_clone = Arc::clone(&engine);

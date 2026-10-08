@@ -78,27 +78,50 @@ assert_eq!(decrypted, b"secret data");
 ### Encrypt Chunks (repository content)
 
 Chunks are sealed with **XChaCha20-Poly1305** under a per-repo content key derived
-with HKDF-SHA256 — not with the OpenPGP identity key, and not with AES-GCM. Each
-chunk's identity (repository, chunk name, size) is bound into the AEAD as
-associated data, so a stored chunk only opens under the identity it was sealed
-with; a spliced or wrong-repo chunk fails authentication rather than decrypting.
+with HKDF-SHA256 — not with the OpenPGP identity key, and not with AES-GCM. The
+blob format is chunk format v3: `[version=3 (1)][nonce (24)][ciphertext][tag (16)]`.
+Each chunk's identity — the repository's immutable id (`repo_uid`, never its
+`owner/name`), the chunk name, the repository key version and the size — is bound
+into the AEAD as associated data, so a stored chunk only opens under the identity
+and key version it was sealed with; a spliced, wrong-repo or wrong-version chunk
+fails authentication rather than decrypting. A rename or transfer changes only
+the display name, so every stored chunk stays readable.
+
+Split repository data with the **keyed** chunker: its boundaries come from a
+per-repo secret Gear table and its chunk names are `HMAC-SHA256(id_key_repo, chunk)`,
+both derived from the same per-repo root key. The unkeyed `ChunkEngine::new` cuts on
+a public table and names chunks by bare SHA-256, which lets anyone who can guess
+your content confirm it from the names; do not use it for repository data.
 
 ```rust
-use gitcellar_crypto::EncryptionEngine;
-use vault_core::chunking::{ChunkEngine, ChunkConfig};
+use gitcellar_crypto::{ChunkAad, EncryptionEngine};
+use vault_core::chunking::{ChunkConfig, ChunkEngine};
 
-let engine = EncryptionEngine::from_default_identity()?;
-let chunk_engine = ChunkEngine::new(ChunkConfig::default());
+// The repository's immutable id (32 lowercase hex), minted with its first key,
+// and the repository key version this engine seals under (versions start at 1).
+let repo_uid = "5f0c9e7a2b1d4c3e8f6a0b9c7d2e1f30";
+let engine = EncryptionEngine::from_default_identity()?.with_key_version(1);
 
-// Split large data into chunks
-let chunks = chunk_engine.chunk_data(&large_data)?;
+// Keyed content-defined chunking: per-repo boundaries and HMAC chunk names
+let chunker = ChunkEngine::new_keyed(ChunkConfig::e1_keyed(), engine.chunk_keying()?);
+let chunks = chunker.chunk_data(&large_data)?;
 
-// Seal chunks in parallel, each bound to its repository identity
-let encrypted_chunks = engine.encrypt_chunks_parallel(repo_id, &chunks).await?;
+// Seal chunks in parallel, each bound to (repo_uid, name, key version, size)
+let sealed = engine.encrypt_chunks_parallel(repo_uid, &chunks).await?;
 
-// Open them again, authenticating against the same identities
-let decrypted_chunks = engine.decrypt_chunks_parallel(&encrypted_chunks, &aads).await?;
+// Open them again: the reader rebuilds each chunk's identity from the
+// owner-signed manifest entry and authenticates against it
+let aads = chunks
+    .iter()
+    .map(|c| ChunkAad::content(repo_uid, &c.hash, 1, c.size as u64))
+    .collect::<Result<Vec<_>, _>>()?;
+let opened = engine.decrypt_chunks_parallel(&sealed, &aads).await?;
 ```
+
+The batch sealer refuses an engine that was never given its key version
+(`with_key_version`), rather than sealing under a guessed one. A caller that
+seals one chunk at a time passes the version in its own `ChunkAad` to
+`encrypt_chunk` instead.
 
 ### Transfer Identity Between Machines (.gckey)
 
@@ -156,10 +179,13 @@ impl EncryptionEngine {
     fn encrypt_data(&self, data: &[u8]) -> Result<Vec<u8>>;
     fn decrypt_data(&self, encrypted_data: &[u8]) -> Result<Vec<u8>>;
 
-    // Chunk sealing: XChaCha20-Poly1305, identity bound as AEAD associated data
+    // Chunk sealing: XChaCha20-Poly1305 (chunk format v3), identity bound as
+    // AEAD associated data: repo_uid, chunk name, key version, size
+    fn with_key_version(self, key_version: u32) -> Self;
+    fn chunk_keying(&self) -> Result<ChunkKeying>;
     fn encrypt_chunk(&self, chunk: &Chunk, aad: &ChunkAad) -> Result<Vec<u8>>;
     fn decrypt_chunk(&self, encrypted_data: &[u8], aad: &ChunkAad) -> Result<Vec<u8>>;
-    async fn encrypt_chunks_parallel(&self, repo_id: &str, chunks: &[Chunk]) -> Result<Vec<Vec<u8>>>;
+    async fn encrypt_chunks_parallel(&self, repo_uid: &str, chunks: &[Chunk]) -> Result<Vec<Vec<u8>>>;
     async fn decrypt_chunks_parallel(&self, encrypted_chunks: &[Vec<u8>], aads: &[ChunkAad]) -> Result<Vec<Vec<u8>>>;
 
     fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>>;
