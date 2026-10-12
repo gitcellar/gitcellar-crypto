@@ -35,8 +35,8 @@
 //!   and refused it for their own unlock. Bitwarden falls back to a master password;
 //!   Dashlane and Apple ADP fall back to a long recovery key.
 //!
-//! Recovery is the 24-word phrase (Path A) + enrolled-device cross-signing (ADR-019
-//! Path C). If PRF is ever unstruck, it may only be an *opportunistic convenience
+//! Recovery is the 24-word phrase (Path A) + enrolled-device cross-signing
+//! (Path C). If PRF is ever unstruck, it may only be an *opportunistic convenience
 //! unlock layered over Path A* — never the root of the hierarchy, never a sole escrow.
 //!
 //! The full analysis and the revisit trigger are recorded in the Multi-Device
@@ -341,7 +341,7 @@ fn deserialize_identity(data: &[u8]) -> Result<Identity> {
 
 /// Encrypt data with a key material using HKDF + AES-256-GCM.
 ///
-/// # Key-material (IKM) contract — IC-4 AC-IC4.3
+/// # Key-material (IKM) contract
 ///
 /// `key_material` is the HKDF **input keying material (IKM)** and MUST be
 /// CSPRNG-derived high-entropy bytes — *never* a user-chosen passphrase.
@@ -361,7 +361,7 @@ fn encrypt_payload(data: &[u8], key_material: &[u8], context: &[u8]) -> Result<E
     debug_assert!(
         key_material.len() >= 32,
         "cloud-backup HKDF IKM must be CSPRNG-derived high-entropy material (>=32 bytes), \
-         never a user passphrase (IC-4 AC-IC4.3); got {} bytes",
+         never a user passphrase; got {} bytes",
         key_material.len()
     );
     let mut rng = rand::thread_rng();

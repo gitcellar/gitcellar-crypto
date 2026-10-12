@@ -4,18 +4,17 @@
 //! enables deduplication by producing consistent chunk boundaries regardless of
 //! insertions/deletions.
 //!
-//! ## Keyed CDC + keyed naming (E1)
+//! ## Keyed CDC + keyed naming
 //!
-//! The boundary function and the chunk *name* can both be **keyed per repo**
-//! (crypto-hardening E1, DEC-CH-04):
+//! The boundary function and the chunk *name* can both be **keyed per repo**:
 //!
-//! - **Keyed boundaries (AC-E1.2/E1.3)** — the FastCDC Gear table is derived
+//! - **Keyed boundaries** — the FastCDC Gear table is derived
 //!   from a per-repo `boundary_key_repo` via keyed BLAKE3:
 //!   `gear[i] = first-64-bits(BLAKE3_keyed(boundary_key_repo, "gear-table" ‖ LE32(i)))`.
 //!   A different `boundary_key_repo` yields different cut points on identical
 //!   input, so the storage provider cannot reproduce chunk boundaries or
 //!   fingerprint plaintext structure from them. It is a full 256-entry keyed
-//!   table, not a 32-bit `chunk_seed` or a secret Rabin polynomial (AC-E1.3).
+//!   table, not a 32-bit `chunk_seed` or a secret Rabin polynomial.
 //!   It is still a **secret-table Gear chunker, the class eprint 2025/558
 //!   analyses**: an adversary who observes exact chunk lengths can learn
 //!   about the table and, from it, the content. Nothing in this module closes
@@ -24,20 +23,20 @@
 //!   so the provider sees lengths only to ladder precision.
 //!   What remains after padding is coarse lengths and timing. The provable
 //!   successor is the reserved chunk-format v5 AES-per-byte keyed chunker
-//!   (`chunk_format`, AC-E1.8), post-launch.
-//! - **Keyed naming (AC-E1.1)** — the chunk object name becomes
+//!   (`chunk_format`), post-launch.
+//! - **Keyed naming** — the chunk object name becomes
 //!   `HMAC-SHA256(id_key_repo, plaintext_chunk)` instead of a bare
 //!   `SHA-256(plaintext)`. Same plaintext + same repo key → identical name
 //!   (per-repo dedup preserved); a different repo key → a different name (the
 //!   confirmation-of-file oracle is closed — the provider cannot compute a name
 //!   without `id_key_repo`).
 //!
-//! Both keys are independent HKDF outputs domain-separated from the F2 content
+//! Both keys are independent HKDF outputs domain-separated from the chunk content
 //! key (see [`crate::encryption`] / `gitcellar-crypto`); they are passed in as a
 //! [`ChunkKeying`]. When no keying is supplied the engine runs **unkeyed**:
 //! FastCDC with a fixed public Gear table + SHA-256 names. The unkeyed path
 //! retains a working chunker for FFI consumers while still retiring the
-//! old dead rolling-hash window (R-3) — there is now a single boundary function.
+//! old dead rolling-hash window — there is now a single boundary function.
 //!
 //! # Example
 //!
@@ -67,14 +66,14 @@ const GEAR_TABLE_SIZE: usize = 256;
 /// confidentiality requirement (it is used by FFI backup consumers, not
 /// the zero-access repo path), so a documented constant key is correct here —
 /// it just gives a well-distributed, deterministic, content-defined boundary
-/// function that retires the old polynomial rolling-hash window (R-3). The E1
+/// function that retires the old polynomial rolling-hash window. The keyed
 /// repo path always supplies a real per-repo `boundary_key_repo` instead.
 const UNKEYED_GEAR_KEY: &[u8; 32] = b"gitcellar/unkeyed-cdc/gear/v1!!!";
 
 /// Derive a 256-entry FastCDC Gear table from a 32-byte key via keyed BLAKE3.
 ///
 /// `gear[i] = first-64-bits(BLAKE3_keyed(key, "gear-table" ‖ LE32(i)))`
-/// (AC-E1.2). Used for both the per-repo keyed table (`boundary_key_repo`) and
+/// Used for both the per-repo keyed table (`boundary_key_repo`) and
 /// the fixed unkeyed table ([`UNKEYED_GEAR_KEY`]).
 fn derive_gear_table(key: &[u8; 32]) -> [u64; GEAR_TABLE_SIZE] {
     let mut gear = [0u64; GEAR_TABLE_SIZE];
@@ -149,11 +148,11 @@ fn fastcdc_boundary(
     cap
 }
 
-/// Per-repo keyed-CDC + keyed-naming material (E1).
+/// Per-repo keyed-CDC + keyed-naming material.
 ///
 /// Holds the BLAKE3-derived Gear table (from `boundary_key_repo`) and the
 /// `id_key_repo` used for HMAC chunk naming. Both keys are independent HKDF
-/// outputs domain-separated from the F2 content key — the caller
+/// outputs domain-separated from the chunk content key — the caller
 /// (`gitcellar-crypto`) derives them from `K_repo` and constructs this via
 /// [`ChunkKeying::derive`]. The provider never receives either key.
 #[derive(Clone)]
@@ -163,12 +162,12 @@ pub struct ChunkKeying {
 }
 
 impl ChunkKeying {
-    /// Build keying from the two per-repo E1 keys.
+    /// Build keying from the two per-repo chunking keys.
     ///
     /// * `boundary_key_repo` — `HKDF(K_repo, "gitcellar/cdc-boundary/v1", 32)`;
-    ///   keys the FastCDC Gear table (AC-E1.2).
+    ///   keys the FastCDC Gear table.
     /// * `id_key_repo` — `HKDF(K_repo, "gitcellar/chunk-name/v1", 32)`; keys the
-    ///   HMAC chunk name (AC-E1.1).
+    ///   HMAC chunk name.
     pub fn derive(boundary_key_repo: &[u8; 32], id_key_repo: &[u8; 32]) -> Self {
         Self {
             gear: derive_gear_table(boundary_key_repo),
@@ -176,7 +175,7 @@ impl ChunkKeying {
         }
     }
 
-    /// `HMAC-SHA256(id_key_repo, plaintext_chunk)`, lowercase hex (AC-E1.1).
+    /// `HMAC-SHA256(id_key_repo, plaintext_chunk)`, lowercase hex.
     fn name(&self, data: &[u8]) -> String {
         let mut mac =
             HmacSha256::new_from_slice(&self.id_key).expect("HMAC-SHA256 accepts any key length");
@@ -210,8 +209,8 @@ fn decode_name(name: &str) -> Option<[u8; 32]> {
 /// Configuration for the chunking algorithm
 ///
 /// `default()` keeps the historical 512 KiB / 1 MiB / 2 MiB profile (used by
-/// FFI consumers and existing callers). The E1 repo path uses
-/// [`ChunkConfig::e1_keyed`] (16 KiB / 64 KiB / 256 KiB per AC-E1.2).
+/// FFI consumers and existing callers). The keyed repo path uses
+/// [`ChunkConfig::e1_keyed`] (16 KiB / 64 KiB / 256 KiB).
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ChunkConfig {
@@ -263,8 +262,8 @@ impl ChunkConfig {
         }
     }
 
-    /// The E1 keyed-CDC size profile: min 16 KiB / target 64 KiB / max 256 KiB
-    /// (AC-E1.2). Smaller chunks than the legacy default → finer dedup and less
+    /// The keyed-CDC size profile: min 16 KiB / target 64 KiB / max 256 KiB.
+    /// Smaller chunks than the legacy default → finer dedup and less
     /// size leakage per object, matched to the restic-class packed-blob model.
     pub fn e1_keyed() -> Self {
         Self {
@@ -283,8 +282,8 @@ impl ChunkConfig {
 pub struct Chunk {
     /// Chunk name / identifier.
     ///
-    /// Unkeyed: `SHA-256(data)`. Keyed (E1): `HMAC-SHA256(id_key_repo, data)`
-    /// (AC-E1.1). Either way it is a 64-char lowercase-hex string that serves as
+    /// Unkeyed: `SHA-256(data)`. Keyed: `HMAC-SHA256(id_key_repo, data)`.
+    /// Either way it is a 64-char lowercase-hex string that serves as
     /// the storage object name, the dedup key, and an integrity reference;
     /// identical content under the same key always produces the same name.
     pub hash: String,
@@ -329,7 +328,7 @@ impl From<&Chunk> for ChunkMetadata {
 ///
 /// Uses gear-based FastCDC to find content-defined boundaries: inserting data at
 /// the start of a file changes only the first chunk; the rest remain identical.
-/// Optionally keyed per repo ([`ChunkKeying`]) for E1 keyed boundaries + naming.
+/// Optionally keyed per repo ([`ChunkKeying`]) for keyed boundaries + naming.
 pub struct ChunkEngine {
     config: ChunkConfig,
     gear: [u64; GEAR_TABLE_SIZE],
@@ -352,9 +351,9 @@ impl ChunkEngine {
         Self::new(ChunkConfig::default())
     }
 
-    /// Create a **keyed** (E1) chunking engine: FastCDC boundaries from the
+    /// Create a **keyed** chunking engine: FastCDC boundaries from the
     /// repo's `boundary_key_repo` Gear table and `HMAC-SHA256(id_key_repo, …)`
-    /// names (AC-E1.1/E1.2). Pair with [`ChunkConfig::e1_keyed`].
+    /// names. Pair with [`ChunkConfig::e1_keyed`].
     pub fn new_keyed(config: ChunkConfig, keying: ChunkKeying) -> Self {
         Self {
             config,
@@ -423,8 +422,8 @@ impl ChunkEngine {
     /// Find chunk boundary using gear-based FastCDC.
     ///
     /// Boundaries depend on this engine's Gear table — the per-repo
-    /// `boundary_key_repo` table when keyed (E1), the fixed public table when
-    /// unkeyed. Replaces the retired polynomial rolling-hash window (R-3).
+    /// `boundary_key_repo` table when keyed, the fixed public table when
+    /// unkeyed. Replaces the retired polynomial rolling-hash window.
     fn find_chunk_boundary(&self, data: &[u8]) -> usize {
         fastcdc_boundary(
             &self.gear,
@@ -438,7 +437,7 @@ impl ChunkEngine {
     /// Compute SHA256 hash of data
     ///
     /// Returns lowercase hexadecimal string. This is the **unkeyed** name
-    /// function (and a general-purpose content hash); E1 keyed names use
+    /// function (and a general-purpose content hash); keyed names use
     /// `HMAC-SHA256` instead (see [`ChunkKeying`]).
     pub fn compute_hash(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
@@ -477,7 +476,7 @@ impl ChunkEngine {
     }
 
     /// Whether `name` is this engine's name for `plaintext` — the keyed
-    /// `HMAC-SHA256(id_key_repo, plaintext)` when keyed (E1), the unkeyed
+    /// `HMAC-SHA256(id_key_repo, plaintext)` when keyed, the unkeyed
     /// `SHA-256` otherwise — compared in constant time.
     ///
     /// This is the reader's name check: after a content
@@ -525,7 +524,7 @@ impl ChunkEngine {
 /// while producing identical chunk boundaries across the virtual stream.
 ///
 /// Like [`ChunkEngine`], it may be **keyed** ([`StreamChunker::new_keyed`]) for
-/// E1 keyed boundaries + naming, or unkeyed ([`StreamChunker::new`]).
+/// keyed boundaries + naming, or unkeyed ([`StreamChunker::new`]).
 ///
 /// # Example
 ///
@@ -559,7 +558,7 @@ impl StreamChunker {
         }
     }
 
-    /// Create a **keyed** (E1) stream chunker: per-repo `boundary_key_repo`
+    /// Create a **keyed** stream chunker: per-repo `boundary_key_repo`
     /// FastCDC boundaries + `HMAC-SHA256(id_key_repo, …)` names.
     pub fn new_keyed(config: ChunkConfig, keying: ChunkKeying) -> Self {
         Self {
@@ -661,7 +660,7 @@ impl StreamChunker {
 mod tests {
     use super::*;
 
-    /// Two independent 32-byte E1 keys for keyed-path tests.
+    /// Two independent 32-byte keys for keyed-path tests.
     fn keying_a() -> ChunkKeying {
         ChunkKeying::derive(&[0x11; 32], &[0x22; 32])
     }
@@ -714,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_e1_keyed_config_sizes() {
-        // AC-E1.2: min 16 KiB / target 64 KiB / max 256 KiB.
+        // Keyed profile: min 16 KiB / target 64 KiB / max 256 KiB.
         let c = ChunkConfig::e1_keyed();
         assert_eq!(c.min_size, 16 * 1024);
         assert_eq!(c.avg_size, 64 * 1024);
@@ -888,10 +887,10 @@ mod tests {
     }
 
     // ========================================================================
-    // E1 — keyed naming (AC-E1.1) + keyed CDC (AC-E1.2/E1.3)
+    // Keyed naming + keyed CDC
     // ========================================================================
 
-    /// AC-E1.1 — keyed naming: same plaintext + same repo key → identical name
+    /// Keyed naming: same plaintext + same repo key → identical name
     /// (dedup preserved); different repo key → different name (oracle closed);
     /// and the keyed name is NOT the bare SHA-256 (the provider, who could
     /// compute SHA-256, cannot compute the name).
@@ -918,7 +917,7 @@ mod tests {
         assert!(name_a1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// AC-E1.2 — keyed boundaries: a different `boundary_key_repo` yields
+    /// Keyed boundaries: a different `boundary_key_repo` yields
     /// different cut points on identical input; the same key is deterministic.
     #[test]
     fn e1_keyed_cdc_boundaries_depend_on_boundary_key() {

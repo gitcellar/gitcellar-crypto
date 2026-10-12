@@ -38,7 +38,7 @@ pub use passkey_core::*;
 // wrap by path (`gitcellar_identity::keywrap::...`). The glob above re-exports
 // passkey-core's public *items* but a bare `pub use ...::*` does not reliably
 // surface a child module as a name-addressable path for `::`-qualified use from
-// dependent crates (F5 / DEC-LD-03).
+// dependent crates.
 pub use passkey_core::keywrap;
 
 /// Get the GitCellar-configured PasskeyConfig

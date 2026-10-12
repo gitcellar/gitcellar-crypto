@@ -1,4 +1,4 @@
-//! Integration tests for `gitcellar-crypto::revocation_cert` (Contract C-2).
+//! Integration tests for `gitcellar-crypto::revocation_cert`.
 
 use ed25519_dalek::SigningKey;
 use gitcellar_crypto::device_cert::SignerRole;
@@ -169,7 +169,7 @@ fn unsupported_version_rejected() {
 
 #[test]
 fn reason_serializes_as_canonical_strings() {
-    // Pin the on-the-wire reason strings (Contract C-2). Renaming any
+    // Pin the on-the-wire reason strings. Renaming any
     // of these enum variants would silently change the CBOR encoding
     // and break all outstanding revocation certs in the field.
     use gitcellar_crypto::revocation_cert::RevocationReason as R;

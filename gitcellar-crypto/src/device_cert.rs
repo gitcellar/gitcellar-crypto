@@ -1,9 +1,9 @@
-//! Device certificates (Contract C-1) for Multi-Device Recovery.
+//! Device certificates for Multi-Device Recovery.
 //!
 //! A [`DeviceCertificate`] binds a device's Ed25519 public key to a user's
 //! published master public key, an enrollment timestamp, a user-supplied
 //! label, a platform string, and the public key of whichever party signed
-//! the cert (master or another non-revoked device — see DEC-MDR-06/07).
+//! the cert (master or another non-revoked device).
 //! The on-the-wire form is **canonical CBOR** of the
 //! [`DeviceCertificatePayload`] followed by a 64-byte Ed25519 signature.
 //! Canonical encoding means: every signer/verifier pair on the network
@@ -156,7 +156,7 @@ impl DeviceCertificate {
     }
 
     /// Build + sign a device cert with an existing device's private key
-    /// (the cross-signing path per DEC-MDR-07).
+    /// (the cross-signing path).
     ///
     /// `signer_pubkey` MUST match the public key of `signer_signing_key`;
     /// no check is made here — passing a mismatch produces a cert that
@@ -211,7 +211,7 @@ impl DeviceCertificate {
     /// (for cross-signed certs) the set of currently non-revoked device
     /// pubkeys.
     ///
-    /// Verification rules (per MDR-035 + DEC-MDR-06/07):
+    /// Verification rules:
     ///
     /// 1. The cert's `master_pubkey` field MUST match `master_pubkey`.
     ///    Catches one-cert-pretending-to-be-from-another-user.

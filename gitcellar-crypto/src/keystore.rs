@@ -1,6 +1,6 @@
-//! Device-key storage abstraction (Multi-Device Recovery, DEC-MDR-14).
+//! Device-key storage abstraction (Multi-Device Recovery).
 //!
-//! Per the Multi-Device Recovery specification § 3 (DEC-MDR-14),
+//! Per the Multi-Device Recovery specification,
 //! the v1 device-key store is exposed behind a [`KeystoreBackend`] trait
 //! so that v2 can introduce hardware-backed implementations (YubiKey,
 //! macOS Secure Enclave, TPM, etc.) without changing API or schema.
@@ -37,7 +37,7 @@ use crate::device_cert::DeviceCertificate;
 pub const DEVICE_PRIVATE_FILENAME: &str = "device.key.bin";
 
 /// Seal the 32-byte device seed for at-rest storage under the Local Protection
-/// Key (F5 / AC-F5.1 / DEC-LD-03): the OS keyring's (DPAPI / Keychain), or on a
+/// Key: the OS keyring's (DPAPI / Keychain), or on a
 /// host whose keyring is unavailable or not persistent (Linux) the headless
 /// secret's (`GITCELLAR_HEADLESS_LPK_SECRET`; see `passkey_core::keywrap`).
 ///
@@ -48,8 +48,9 @@ pub const DEVICE_PRIVATE_FILENAME: &str = "device.key.bin";
 /// never reaches disk as plaintext. Until 2026-09-25 it returned the raw seed
 /// with a warning "to preserve availability", so a keyring failure silently
 /// downgraded the at-rest seal to filesystem permissions.
-/// The read path's [`open_device_seed_at_rest`] still accepts a legacy (pre-F5)
-/// plaintext seed, so existing devices keep loading.
+/// The read path's [`open_device_seed_at_rest`] still accepts a legacy
+/// plaintext seed (written before at-rest sealing), so existing devices keep
+/// loading.
 pub fn try_seal_device_seed_at_rest(seed: &[u8; 32]) -> Result<Vec<u8>, KeystoreError> {
     #[cfg(feature = "keyring")]
     {
@@ -72,7 +73,8 @@ pub fn try_seal_device_seed_at_rest(seed: &[u8; 32]) -> Result<Vec<u8>, Keystore
 }
 
 /// Open an at-rest device-seed payload, transparently passing through a legacy
-/// (pre-F5) plaintext 32-byte seed (F5 / DEC-LD-03). Shared so every reader of
+/// plaintext 32-byte seed (written before at-rest sealing). Shared so every
+/// reader of
 /// `device.key.bin` opens the seal identically.
 pub fn open_device_seed_at_rest(raw: &[u8]) -> Result<Vec<u8>, KeystoreError> {
     if gitcellar_identity::keywrap::is_wrapped(raw) {
@@ -95,7 +97,7 @@ pub fn open_device_seed_at_rest(raw: &[u8]) -> Result<Vec<u8>, KeystoreError> {
 /// Build an Ed25519 [`SigningKey`] from a 32-byte seed, **wiping `seed` in the
 /// same breath**.
 ///
-/// F-6 (hardening review, Aug 2026): the read path used to land the opened seed in a
+/// The read path used to land the opened seed in a
 /// bare `[u8; 32]`, hand a `Copy` of it to `Zeroizing::new(...)`, and then build
 /// the key from the still-live original — so the "wiped" value was a copy and the
 /// real seed survived unzeroized in freed stack memory (recoverable from a crash
@@ -159,7 +161,7 @@ pub enum KeystoreError {
 /// signing through the local-only private key, and persist the
 /// associated [`DeviceCertificate`] + master public key. v1 has a single
 /// implementation ([`FileSystemKeystore`]); v2 plans hardware-backed
-/// implementations (DEC-MDR-14).
+/// implementations.
 ///
 /// Methods are synchronous and not `async` — file-system / hardware
 /// access is the bottleneck, not network I/O. Callers that need
@@ -270,12 +272,12 @@ impl FileSystemKeystore {
         if !path.exists() {
             return Err(KeystoreError::NotInitialized);
         }
-        // A legacy (pre-F5) file IS the plaintext seed, so the raw read buffer
-        // holds key material too — carry it in `Zeroizing` rather than leaving a
-        // freed `Vec` behind.
+        // A legacy file (written before at-rest sealing) IS the plaintext seed,
+        // so the raw read buffer holds key material too — carry it in
+        // `Zeroizing` rather than leaving a freed `Vec` behind.
         let raw: Zeroizing<Vec<u8>> = Zeroizing::new(fs::read(&path)?);
-        // F5 (AC-F5.1, DEC-LD-03): open the at-rest seal. A legacy (pre-F5)
-        // plaintext 32-byte seed lacks the wrap magic and passes through
+        // Open the at-rest seal. A legacy plaintext 32-byte seed (written
+        // before at-rest sealing) lacks the wrap magic and passes through
         // unchanged, so existing device keys keep working and are re-sealed on
         // the next write.
         let mut seed: Zeroizing<Vec<u8>> = Zeroizing::new(open_device_seed_at_rest(&raw)?);
@@ -326,7 +328,7 @@ impl KeystoreBackend for FileSystemKeystore {
         let pubkey = signing_key.verifying_key().to_bytes();
         let mut secret_bytes = signing_key.to_bytes();
 
-        // F5 (AC-F5.1/F5.4, DEC-LD-03): seal the 32-byte private seed with the
+        // Seal the 32-byte private seed with the
         // OS-keyring/DPAPI-backed Local Protection Key before it touches disk.
         // The on-disk `device.key.bin` is never 32 raw plaintext bytes; an
         // infostealer reading it off disk gets AES-256-GCM ciphertext, closing
@@ -346,7 +348,7 @@ impl KeystoreBackend for FileSystemKeystore {
         // Drop the in-memory copies; SigningKey is ZeroizeOnDrop, and the local
         // `secret_bytes` is a stack copy.
         //
-        // F-6 (hardening review, Aug 2026): this used to be
+        // This used to be
         // `Zeroizing::new(secret_bytes)`, which — `[u8; 32]` being `Copy` —
         // zeroized a COPY and left the freshly generated device seed live in
         // `secret_bytes`. Zeroize the real value instead.
@@ -423,7 +425,7 @@ impl KeystoreBackend for FileSystemKeystore {
 mod tests {
     use super::*;
 
-    /// F-6 (hardening review, Aug 2026) — the seed buffer the signing key is built
+    /// The seed buffer the signing key is built
     /// from must be wiped in place. The pre-fix read path zeroized a `Copy` of
     /// the seed and then built the key from the still-live original, so the real
     /// device seed survived unzeroized. This is the observable half of that fix.
@@ -440,7 +442,7 @@ mod tests {
         assert_eq!(
             seed,
             vec![0u8; 32],
-            "F-6: the seed buffer must be zeroized in place, not copied and abandoned"
+            "the seed buffer must be zeroized in place, not copied and abandoned"
         );
     }
 

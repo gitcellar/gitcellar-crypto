@@ -1,8 +1,8 @@
-//! Revocation certificates (Contract C-2) for Multi-Device Recovery.
+//! Revocation certificates for Multi-Device Recovery.
 //!
 //! A [`RevocationCertificate`] proves that a particular device's keypair
 //! is no longer authorized for the user's account. The signing-authority
-//! rules mirror device certificates (DEC-MDR-06): a revocation is valid
+//! rules mirror device certificates: a revocation is valid
 //! if signed by either (a) the user's published master pubkey
 //! (re-derived from the phrase), or (b) any non-revoked device pubkey
 //! belonging to that user.
@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::device_cert::SignerRole;
 use crate::master::{verify_with_verifying_key, MasterKeyDerivation, MasterKeyError, MaterializedMaster};
 
-/// Reason field in a revocation certificate (Contract C-2).
+/// Reason field in a revocation certificate.
 ///
 /// Serializes as the canonical-CBOR strings `"user_initiated"`,
 /// `"compromise"`, `"device_lost"`, `"rotation"` — these strings are part
@@ -136,7 +136,7 @@ impl RevocationCertificate {
     }
 
     /// Build + sign a revocation cert with a surviving device's private
-    /// key (cross-signing per DEC-MDR-06).
+    /// key (cross-signing).
     ///
     /// Per the spec, a device may revoke itself; whether the API surface
     /// exposes that is a Cloud-API decision (not the crypto layer's).

@@ -1,4 +1,4 @@
-//! Identity succession statements (`gc-identity-succession-v1`) — KTR-5, DEC-KT-03.
+//! Identity succession statements (`gc-identity-succession-v1`).
 //!
 //! When an account replaces its identity key (recovery from the phrase on a new
 //! machine, cutting off a lost one), the Cloud must accept the new key only on

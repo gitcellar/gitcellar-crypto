@@ -119,8 +119,8 @@ impl Identity {
         let raw = std::fs::read(&secret_path)
             .map_err(|e| PasskeyError::KeyLoad(format!("Failed to read {}: {}", secret_path.display(), e)))?;
 
-        // F5 (DEC-LD-03): open the at-rest seal. A legacy (pre-F5) plaintext
-        // secret.pgp lacks the wrap magic and passes through unchanged, so
+        // Open the at-rest seal. A legacy plaintext secret.pgp (written before
+        // at-rest sealing) lacks the wrap magic and passes through unchanged, so
         // existing identities keep loading and are re-sealed on the next save.
         let cert_data: Vec<u8> = {
             #[cfg(feature = "keyring")]
@@ -196,13 +196,13 @@ impl Identity {
         let public_path = path.join(PUBLIC_KEY_FILE);
 
         // Serialize the full TSK (secret material) to a buffer so it can be
-        // sealed at rest (F5 / AC-F5.4) before touching disk.
+        // sealed at rest before touching disk.
         let mut tsk_bytes: Vec<u8> = Vec::new();
         self.cert.as_tsk().serialize(&mut tsk_bytes)
             .map_err(|e| PasskeyError::KeySave(format!("Failed to write secret key: {}", e)))?;
 
-        // F5 (AC-F5.4, DEC-LD-03): seal the secret key with the OS-keyring/DPAPI
-        // -backed Local Protection Key. The on-disk bytes become AES-256-GCM
+        // Seal the secret key with the OS-keyring/DPAPI-backed Local Protection
+        // Key. The on-disk bytes become AES-256-GCM
         // ciphertext, so an infostealer reading the file gets nothing usable —
         // protection no longer relies on the inherited ACL alone. If the seal
         // cannot be made, NOTHING is written — not even the directory. Until
@@ -220,7 +220,7 @@ impl Identity {
 
         // Set restrictive permissions on secret key (Unix only). Best-effort
         // defence-in-depth; the at-rest seal above is the primary protection
-        // and closes the Windows inherited-ACL gap (AC-F5.4).
+        // and closes the Windows inherited-ACL gap.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -447,8 +447,9 @@ mod tests {
         assert_eq!(loaded.fingerprint(), identity.fingerprint());
     }
 
-    /// The documented migration: a pre-F5 plaintext `secret.pgp` still loads,
-    /// and the next `save_to` re-seals it. Reads the bytes back both times.
+    /// The documented migration: a legacy plaintext `secret.pgp`
+    /// (written before at-rest sealing) still loads, and the next `save_to`
+    /// re-seals it. Reads the bytes back both times.
     #[cfg(feature = "keyring")]
     #[test]
     fn test_legacy_plaintext_secret_key_loads_and_is_resealed_on_save() {

@@ -107,7 +107,7 @@ pub use auth::{Claims, TokenPair, generate_access_token, generate_refresh_token,
 pub use credential_store::CredentialStore;
 pub use credential_store::{CredentialBackend, MemoryCredentialStore, keys as credential_keys};
 
-// At-rest key wrap (F5 / DEC-LD-03)
+// At-rest key wrap (OS keyring / DPAPI)
 pub use keywrap::{is_wrapped, wrap_with_key, unwrap_with_key, KEYWRAP_MAGIC};
 #[cfg(feature = "keyring")]
 pub use keywrap::{wrap_at_rest, unwrap_at_rest, local_protection_key, local_protection_secret};

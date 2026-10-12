@@ -149,8 +149,8 @@ async fn body_exactly_at_the_ceiling_is_accepted() {
     assert_eq!(got.len(), 1024);
 }
 
-/// **The error-path hole, which is the subtle half of M-9.** A hostile provider
-/// answering 500 with a huge body defeated the object ceiling *in the same
+/// **The error-path hole, which is the subtle half of bounding provider reads.**
+/// A hostile provider answering 500 with a huge body defeated the object ceiling *in the same
 /// call*, because the error branch read the body with an unbounded
 /// `resp.text()`. `read_text_bounded` never returns an error — the caller is
 /// already reporting a different failure and must not have it replaced by this

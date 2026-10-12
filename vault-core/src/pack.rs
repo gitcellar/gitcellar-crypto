@@ -1,21 +1,21 @@
-//! Pack-into-blobs size-hiding for stored chunks (E1-PhaseB, AC-E1.4).
+//! Pack-into-blobs size-hiding for stored chunks.
 //!
 //! ## Why packing exists
 //!
-//! GitCellar's pre-E1-PhaseB layout stored **one encrypted chunk per storage
+//! GitCellar's earlier layout stored **one encrypted chunk per storage
 //! object** (`repos/{repo}/chunks/{hmac}.gpg`). The storage backend — the
 //! adversary in the zero-access model — sees every object's size, so the
 //! per-chunk size sequence becomes a content/structure fingerprint that survives
-//! encryption (E1 research §2/§4; eprint 2025/532 & 2025/558). Keyed naming
-//! (AC-E1.1) and keyed CDC boundaries (AC-E1.2) — both already shipped in E1
-//! Phase A — close the name-confirmation and boundary-reproduction oracles, but
+//! encryption (eprint 2025/532 & 2025/558). Keyed chunk naming and keyed CDC
+//! boundaries, both shipped before packing, close the name-confirmation and
+//! boundary-reproduction oracles, but
 //! **not** the size channel.
 //!
 //! This module **narrows** the size channel in two layers:
 //!
 //! 1. **Packing**, the **restic 0.18.0 pack model**: many encrypted chunks are
 //!    concatenated into a larger **pack** blob and assigned to packs at random,
-//!    so a stored object's size no longer maps to one chunk (AC-E1.4).
+//!    so a stored object's size no longer maps to one chunk.
 //! 2. **Padding**: every pack is padded with
 //!    random filler to the smallest step of a geometric ladder at or above its
 //!    content: a 256 KiB floor ([`PAD_LADDER_FLOOR`]), then x1.25 per step
@@ -64,7 +64,7 @@
 //! The shipped chunker is a secret-table Gear CDC, the class eprint 2025/558
 //! analyses. Padding addresses the length observation that attack needs; the
 //! provable successor is the reserved v5 AES-per-byte keyed chunker. The
-//! access-pattern residual is likewise open and documented (AC-E1.7).
+//! access-pattern residual is likewise open.
 //! Recorded because this crate is published for third-party audit: an
 //! accurate residual list is worth more than a confident summary, and
 //! overclaiming in crypto prose is a failure mode this project has already
@@ -77,7 +77,8 @@
 //! ```text
 //! pack object  =  chunk_blob_0 ‖ chunk_blob_1 ‖ … ‖ chunk_blob_{k-1} ‖ filler
 //! each chunk_blob_i = [ver(1)][nonce(24)][ciphertext(n)][tag(16)]   (its own AEAD unit)
-//! object key   =  repos/{repo_id}/packs/{pack_id}
+//! object key   =  repos/{prefix}/packs/{pack_id}
+//! prefix       =  hex(HMAC-SHA256(id_key_repo_prefix, repo_uid)), one per key version
 //! ```
 //!
 //! The pack carries **no plaintext framing** the provider could read — no chunk
@@ -92,10 +93,10 @@
 //! the encrypted manifest and never reads past the last blob, so the filler is
 //! invisible to it and the read format is unchanged.
 //!
-//! Each chunk blob is self-contained and already version-tagged (F6 byte inside
+//! Each chunk blob is self-contained and already version-tagged (the version byte inside
 //! the blob), so packing is a pure **outer** layer: it never inspects, reframes,
-//! or perturbs chunk bytes, and F6 per-chunk version dispatch is unchanged. The
-//! published F2/E3 chunk test vector therefore still reproduces bit-for-bit.
+//! or perturbs chunk bytes, and per-chunk version dispatch is unchanged. The
+//! published chunk test vector therefore still reproduces bit-for-bit.
 //!
 //! ## Reading back
 //!
@@ -103,11 +104,11 @@
 //! `pack[offset .. offset+length]` with [`slice_chunk`] to recover the exact
 //! encrypted-chunk blob, which decrypts normally. Whole-pack fetch (rather than
 //! an HTTP range request) is deliberate: a range request would re-leak the
-//! intra-pack offset/size to the backend, partly undoing AC-E1.4, and the
+//! intra-pack offset/size to the backend, partly undoing the packing, and the
 //! `StorageBackend` trait exposes no range API. One pack holds many of a read's
 //! needed chunks, so a single fetch + client cache serves many slices — this is
-//! the "batched fetch + client cache" access-pattern mitigation of DEC-CH-10 /
-//! RT-1 (the access-pattern residual stays open and documented, AC-E1.7).
+//! the "batched fetch + client cache" access-pattern mitigation (the
+//! access-pattern residual itself stays open).
 //!
 //! ## Dedup
 //!
@@ -125,7 +126,7 @@ use std::collections::HashSet;
 
 /// Default target pack size (~4 MiB).
 ///
-/// With E1's 16–256 KiB chunks this is ~16–256 chunks per pack — enough that an
+/// With the CDC's 16–256 KiB chunks this is ~16–256 chunks per pack — enough that an
 /// individual chunk's size is hidden among many, while a pack stays small enough
 /// for one `download` to be a reasonable read unit. A chunk is never split across
 /// packs (it is an AEAD unit), so a chunk larger than the target gets its own
@@ -195,12 +196,12 @@ pub const PACK_ID_HEX_LEN: usize = 64;
 ///
 /// This is the per-chunk entry of the encrypted manifest. `length` is the size of
 /// the **encrypted** chunk blob (`[ver][nonce][ct][tag]`), not the plaintext.
-/// `u32` is ample: an E1 chunk maxes at 256 KiB + 41 B overhead, far below
+/// `u32` is ample: a chunk maxes at 256 KiB + 41 B overhead, far below
 /// `u32::MAX`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackLocation {
     /// The `pack_id` (random 256-bit hex) — the object key is
-    /// `repos/{repo_id}/packs/{pack_id}`.
+    /// `repos/{prefix}/packs/{pack_id}`, the prefix keyed over the repo's `repo_uid`.
     pub pack_id: String,
     /// Byte offset of the chunk blob within the pack.
     pub offset: u64,
@@ -208,7 +209,7 @@ pub struct PackLocation {
     pub length: u32,
 }
 
-/// A finished pack ready to upload under `repos/{repo_id}/packs/{pack_id}`.
+/// A finished pack ready to upload under `repos/{prefix}/packs/{pack_id}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltPack {
     /// Random 256-bit hex id; the storage object key.
@@ -260,7 +261,7 @@ pub fn random_pack_id<R: Rng + ?Sized>(rng: &mut R) -> String {
 /// determined are new (not already stored — cross-push dedup is the caller's job).
 /// The batch is shuffled with `rng` before sequential fill, so a chunk's
 /// co-location with its stream neighbours is not a stable fingerprint (random
-/// assignment, AC-E1.4). Within the batch, a repeated `chunk_name` is stored once
+/// assignment). Within the batch, a repeated `chunk_name` is stored once
 /// (intra-batch dedup), keeping `index` names unique.
 ///
 /// Returns a [`PackSet`]: the packs to upload and the `chunk_name → PackLocation`
@@ -402,7 +403,7 @@ mod tests {
         assert!(ids_a.is_disjoint(&ids_b), "pack ids must not repeat across runs");
     }
 
-    /// AC-E1.4 core: many small chunks collapse into far fewer packs, and no
+    /// The packing core: many small chunks collapse into far fewer packs, and no
     /// pack's size equals any single input chunk's size.
     #[test]
     fn many_chunks_pack_into_fewer_blobs_hiding_per_chunk_size() {

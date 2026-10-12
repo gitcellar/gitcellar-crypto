@@ -1,10 +1,9 @@
-//! Integration tests for `gitcellar-crypto::master` (Multi-Device Recovery, ADR-019).
+//! Integration tests for `gitcellar-crypto::master` (Multi-Device Recovery).
 //!
 //! Pinned at the public API surface: `MaterializedMaster`,
-//! `MasterKeyDerivation`, and `verify_with_pubkey`. The Probandurgy
-//! Agent-Testability-Gate scaffold for master zeroization is also here
-//! (the published `zeroize` crate test pattern — `Zeroizing` wrapper drop
-//! semantics).
+//! `MasterKeyDerivation`, and `verify_with_pubkey`. The master zeroization
+//! tests are also here (the published `zeroize` crate test pattern —
+//! `Zeroizing` wrapper drop semantics).
 
 use gitcellar_crypto::master::{
     verify_with_pubkey, MasterKeyDerivation, MasterKeyError, MaterializedMaster,
@@ -140,13 +139,14 @@ fn derivation_constants_pinned() {
 }
 
 // --------------------------------------------------------------------
-// Probandurgy Agent-Testability-Gate scaffold #1: master zeroization.
+// Master zeroization.
 //
 // These tests exercise the published `zeroize` crate pattern
-// (`Zeroizing<T>` Drop wipes the buffer). The asm-inspection CI probe
-// (`Scripts/zeroize-asm-probe.ps1`) covers the orthogonal concern that
-// the optimizer doesn't elide the volatile-write — these tests cover
-// the contract that the API exposes a zeroizing wrapper at all.
+// (`Zeroizing<T>` Drop wipes the buffer). They cover the contract that
+// the API exposes a zeroizing wrapper at all; whether the optimizer
+// elides the volatile write is an orthogonal concern that only an
+// inspection of the generated assembly can answer, and these tests do
+// not claim it.
 // --------------------------------------------------------------------
 
 #[test]

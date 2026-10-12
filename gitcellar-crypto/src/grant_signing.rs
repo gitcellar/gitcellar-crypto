@@ -1,4 +1,4 @@
-//! I-1 — origin signatures over repo-key grants (`gc-grant-v2`).
+//! Origin signatures over repo-key grants (`gc-grant-v2`).
 //!
 //! ## The defect this closes (grant integrity rested entirely on TOFU)
 //!
@@ -8,7 +8,7 @@
 //! explicitly *rejects* an enclosed signature layer — see
 //! `encryption.rs`'s `VerificationHelper::check`), so the only thing standing
 //! between a collaborator and an attacker-supplied repo key was the receiver's
-//! **first-contact TOFU pin** (`key_manager::enforce_repo_key_pin`, P0-4).
+//! **first-contact TOFU pin** (`key_manager::enforce_repo_key_pin`).
 //!
 //! TOFU is a real defense, but it is a defense with a hole exactly where it
 //! matters most: **first contact**. On the very first grant for a
@@ -89,11 +89,11 @@
 //!   its own key (decryption is not a trust action — it is just bytes), parses
 //!   the bundle, verifies authorship, and only THEN touches the keyring. The
 //!   trust boundary is the import, and the check sits in front of it.
-//! - **Old-format grants fail closed.** A pre-I-1 payload (a bare TSK) is not
-//!   valid bundle JSON, so it is refused rather than silently imported
-//!   unverified. Pre-launch, that is a dev-data reset — by design.
+//! - **Old-format grants fail closed.** A payload from before grants were
+//!   signed (a bare TSK) is not valid bundle JSON, so it is refused rather
+//!   than silently imported unverified. Pre-launch, that is a dev-data reset — by design.
 //!
-//! ## A delegated grant carries its delegation inside the signed bytes (KTD-6)
+//! ## A delegated grant carries its delegation inside the signed bytes
 //!
 //! A grant signed by someone other than the repo owner (an org admin, a
 //! collaborator re-sharing) is authorized by an owner-signed delegation. That
@@ -125,7 +125,7 @@ use crate::error::{CryptoError, Result};
 /// v2 binds the repository's immutable `repo_uid`.
 pub const GRANT_CANONICAL_VERSION: &str = "gc-grant-v2";
 
-/// Domain tag for the canonical of a grant that carries a delegation (KTD-6).
+/// Domain tag for the canonical of a grant that carries a delegation.
 /// Distinct from [`GRANT_CANONICAL_VERSION`], so a delegated grant's signature
 /// can never verify as a plain grant once its delegation is stripped.
 pub const DELEGATED_GRANT_CANONICAL_VERSION: &str = "gc-grant-delegated-v2";
@@ -238,8 +238,8 @@ impl RepoKeyGrant {
     }
 }
 
-/// An owner-signed repo delegation as it travels inside a [`GrantBundle`]
-/// (KTD-6): the fields of `repo_owner::RepoDelegation` plus the owner's
+/// An owner-signed repo delegation as it travels inside a [`GrantBundle`]:
+/// the fields of `repo_owner::RepoDelegation` plus the owner's
 /// base64 detached signature over that delegation's canonical.
 ///
 /// Carried verbatim (never re-normalized in the grant canonical), so what the
@@ -255,7 +255,7 @@ pub struct GrantDelegation {
     pub delegate_account: String,
     /// The delegate's identity fingerprint (normalized) — must be the granter.
     pub delegate_fingerprint: String,
-    /// The one repo-key version the delegation covers (KTD-7).
+    /// The one repo-key version the delegation covers.
     pub key_version: u32,
     /// Delegation issuance time, unix seconds.
     pub timestamp_unix: i64,
@@ -280,7 +280,7 @@ pub fn sign_repo_key_grant(engine: &EncryptionEngine, grant: &RepoKeyGrant) -> R
 /// against the granter's armored public cert.
 ///
 /// **Fail-closed contract.** Returns `Ok(false)` for an EMPTY signature (an
-/// unsigned grant is never valid — the pre-I-1 shape must not silently pass)
+/// unsigned grant is never valid — the old unsigned shape must not silently pass)
 /// and for a signature that does not verify. Returns `Err` only when the cert
 /// cannot be parsed or the base64 is malformed — callers must treat an `Err`
 /// as a refusal too, never as "skip the check".
@@ -326,9 +326,9 @@ pub struct GrantBundle {
     /// Base64 detached signature over the [`RepoKeyGrant`] canonical — or, when
     /// `delegation` is present, over [`RepoKeyGrant::canonical_with_delegation`].
     pub grant_sig_b64: String,
-    /// The owner-signed delegation authorizing a non-owner granter (KTD-6).
+    /// The owner-signed delegation authorizing a non-owner granter.
     /// Absent for an owner-signed grant, and then omitted from the JSON, so an
-    /// owner's bundle is byte-identical to the pre-KTD-6 shape.
+    /// owner's bundle is byte-identical to the shape from before delegations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<GrantDelegation>,
 }
@@ -377,12 +377,13 @@ impl GrantBundle {
     }
 
     /// Parse a decrypted grant payload. STRICT: rejects a non-JSON payload (e.g.
-    /// a pre-I-1 bare TSK) and a wrong/absent version tag, so an unsigned legacy
-    /// grant can never alias-parse into a bundle and skip verification.
+    /// a bare TSK from before grants were signed) and a wrong/absent version
+    /// tag, so an unsigned legacy grant can never alias-parse into a bundle and
+    /// skip verification.
     pub fn from_json(bytes: &[u8]) -> Result<GrantBundle> {
         let bundle: GrantBundle = serde_json::from_slice(bytes).map_err(|e| {
             CryptoError::Decryption(format!(
-                "grant payload is not a gc-grant bundle (a pre-I-1 unsigned grant looks like \
+                "grant payload is not a gc-grant bundle (an old unsigned grant looks like \
                  this — it must be re-issued, not imported): {e}"
             ))
         })?;
@@ -403,7 +404,7 @@ impl GrantBundle {
 
 /// Build a signed [`GrantBundle`] for the repository `repo_uid` — the
 /// granter-side composition point. With a
-/// `delegation` (KTD-6) the granter's signature covers it too (see
+/// `delegation` the granter's signature covers it too (see
 /// [`RepoKeyGrant::canonical_with_delegation`]).
 ///
 /// `granter_engine` MUST hold the granting identity's secret key.
@@ -464,7 +465,7 @@ pub fn build_signed_grant_bundle(
     )
 }
 
-/// [`build_signed_repo_grant_bundle`] carrying `delegation` (KTD-6): a
+/// [`build_signed_repo_grant_bundle`] carrying `delegation`: a
 /// delegate's grant of the repository `repo_uid`.
 pub fn build_signed_delegated_grant_bundle(
     granter_engine: &EncryptionEngine,
@@ -688,7 +689,7 @@ mod tests {
         assert!(verify_repo_key_grant(&granter_cert, &g, &sig).unwrap());
     }
 
-    /// FAIL-CLOSED — an absent signature is never valid. This is the pre-I-1
+    /// FAIL-CLOSED — an absent signature is never valid. This is the old unsigned
     /// shape (a grant with no origin signature); it must not pass.
     #[test]
     fn absent_signature_is_rejected() {
@@ -709,9 +710,9 @@ mod tests {
         assert!(!verify_repo_key_grant(&granter_cert, &g, &forged).unwrap());
     }
 
-    /// TAMPERED — the key-substitution attack I-1 exists to stop. A genuine
-    /// signature over the real grant must NOT verify once the granted key is
-    /// swapped for the attacker's.
+    /// TAMPERED — the key-substitution attack grant signing exists to stop. A
+    /// genuine signature over the real grant must NOT verify once the granted
+    /// key is swapped for the attacker's.
     #[test]
     fn swapped_key_material_invalidates_the_signature() {
         let (granter, granter_cert) = engine_and_cert("owner@example.com");
@@ -787,9 +788,10 @@ mod tests {
         assert!(outcome.allow());
     }
 
-    /// FAIL-CLOSED — a pre-I-1 payload (a bare TSK, not bundle JSON) must be
-    /// REFUSED, never imported unverified. This is the regression guard for the
-    /// whole point of I-1: unsigned grants must stop working.
+    /// FAIL-CLOSED — a payload from before grants were signed (a bare TSK, not
+    /// bundle JSON) must be REFUSED, never imported unverified. This is the
+    /// regression guard for the whole point of grant signing: unsigned grants
+    /// must stop working.
     #[test]
     fn legacy_unsigned_payload_is_refused() {
         let legacy_tsk = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\nnot json\n";

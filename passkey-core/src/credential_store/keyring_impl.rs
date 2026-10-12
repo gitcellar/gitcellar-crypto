@@ -81,8 +81,16 @@ impl CredentialBackend for CredentialStore {
 mod tests {
     use super::*;
 
-    // Note: These tests interact with the actual OS credential store.
-    // They may fail in CI environments without a keyring.
+    // These tests interact with the actual OS credential store.
+    //
+    // They used to skip on ANY store/get failure, and on a
+    // store that "succeeded" but read back None. keyring v3 silently falls back
+    // to an in-memory MOCK when no platform backend feature is enabled, which is
+    // exactly the build-graph regression Cargo.toml's backend features exist to
+    // prevent -- and these tests read it as "CI without a keyring". Now: the mock
+    // is a failure, a backend-absent signal from keyring (NoStorageAccess /
+    // PlatformFailure on the probe write) is the only skip, and once the probe
+    // write succeeded every operation must work.
 
     const TEST_SERVICE: &str = "passkey-core-test";
 
@@ -90,8 +98,45 @@ mod tests {
         CredentialStore::with_service_name(TEST_SERVICE)
     }
 
+    /// `true` when a real OS backend is usable, `false` only on keyring's own
+    /// backend-absent signal. Panics on the mock or any other failure.
+    fn os_backend_available() -> bool {
+        // On Linux (keyutils) Entry::new already touches the kernel keyring, and a
+        // default-seccomp container refuses keyctl with EPERM -> PlatformFailure;
+        // that is the same backend-absent signal as on the probe write below.
+        let entry = match Entry::new(TEST_SERVICE, "backend_probe") {
+            Ok(e) => e,
+            Err(keyring::Error::NoStorageAccess(e)) | Err(keyring::Error::PlatformFailure(e)) => {
+                eprintln!("Skipping: no usable OS keyring in this environment: {e}");
+                return false;
+            }
+            Err(e) => panic!("keyring Entry::new failed for a reason that is not backend absence: {e}"),
+        };
+        assert!(
+            entry
+                .get_credential()
+                .downcast_ref::<keyring::mock::MockCredential>()
+                .is_none(),
+            "keyring resolved to its in-memory MOCK store: no platform backend feature is enabled in this build graph, so credentials do not persist across processes"
+        );
+        match entry.set_password("probe") {
+            Ok(()) => {
+                let _ = entry.delete_credential();
+                true
+            }
+            Err(keyring::Error::NoStorageAccess(e)) | Err(keyring::Error::PlatformFailure(e)) => {
+                eprintln!("Skipping: no usable OS keyring in this environment: {e}");
+                false
+            }
+            Err(e) => panic!("OS keyring probe write failed for a reason that is not backend absence: {e}"),
+        }
+    }
+
     #[test]
     fn test_store_and_retrieve() {
+        if !os_backend_available() {
+            return;
+        }
         let store = test_store();
         let key = "test_key_passkey";
         let value = "test_value_12345";
@@ -99,26 +144,11 @@ mod tests {
         // Clean up first
         let _ = store.delete(key);
 
-        // Store - skip test if keyring write fails
-        if let Err(e) = store.store(key, value) {
-            eprintln!("Skipping test: cannot write to OS keyring: {:?}", e);
-            return;
-        }
-
-        // Retrieve
-        let retrieved = match store.get(key) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                // Some keyring backends return success but don't actually persist
-                // This is common in CI/non-interactive environments
-                eprintln!("Skipping test: keyring store succeeded but retrieve returned None (common in CI)");
-                return;
-            }
-            Err(e) => {
-                eprintln!("Skipping test: cannot read from OS keyring: {:?}", e);
-                return;
-            }
-        };
+        store.store(key, value).expect("store on a working OS keyring");
+        let retrieved = store
+            .get(key)
+            .expect("get on a working OS keyring")
+            .expect("a stored credential must read back (None = the store did not persist)");
         assert_eq!(retrieved, value);
 
         // Clean up
@@ -127,37 +157,34 @@ mod tests {
 
     #[test]
     fn test_not_found() {
+        if !os_backend_available() {
+            return;
+        }
         let store = test_store();
         let key = "nonexistent_credential_xyz123";
 
         // Make sure it doesn't exist
         let _ = store.delete(key);
 
-        // A keyring-less environment (the CI container) surfaces a platform
-        // error rather than Ok(None) — an environment fact, not a regression.
-        // Skip in that case, matching
-        // test_store_and_retrieve above.
         match store.get(key) {
             Ok(None) => {} // Expected: no credential, no error
             Ok(Some(_)) => {
                 let _ = store.delete(key);
                 panic!("Expected no credential for nonexistent key");
             }
-            Err(e) => {
-                eprintln!("Skipping test: OS keyring not functional in this environment: {e:?}");
-            }
+            Err(e) => panic!("get of a missing key errored on a working OS keyring: {e:?}"),
         }
     }
 
     #[test]
     fn test_delete() {
+        if !os_backend_available() {
+            return;
+        }
         let store = test_store();
         let key = "test_delete_key";
 
-        // Skip if can't write
-        if store.store(key, "value").is_err() {
-            return;
-        }
+        store.store(key, "value").expect("store on a working OS keyring");
 
         // Delete
         store.delete(key).unwrap();

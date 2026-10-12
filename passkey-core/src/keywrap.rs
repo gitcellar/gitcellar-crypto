@@ -1,14 +1,14 @@
-//! At-rest key wrapping via the OS keyring / DPAPI (F5, DEC-LD-03).
+//! At-rest key wrapping via the OS keyring / DPAPI.
 //!
 //! GitCellar's most sensitive key material — the device Ed25519 seed, the
 //! OpenPGP identity secret key, and (via [`local_protection_secret`]) the
 //! repository-key keyring — is written to flat files under the user's config
 //! directory. Historically those files were **plaintext**, protected only by a
 //! Unix `0600` mode (and, on Windows, by the ACL inherited from `%APPDATA%`).
-//! That is exactly the threat DEC-SEC-001 calls out: an infostealer running as
+//! That is exactly the infostealer threat: malware running as
 //! the user reads the plaintext straight off disk.
 //!
-//! This module closes that gap at the **lowest crate layer** (DEC-LD-03): the
+//! This module closes that gap at the **lowest crate layer**: the
 //! key material's writers (`gitcellar-crypto::keystore`, `passkey-core::identity`)
 //! cannot depend on the Service crate, so the wrap lives here in `passkey-core`,
 //! backed directly by the `keyring` crate (Windows Credential Manager / DPAPI,
@@ -577,11 +577,11 @@ impl LpkStore for KeyringLpkStore {
 }
 
 /// Base64 form of the Local Protection Key, suitable as a stable passphrase for
-/// the Service repository-key keyring (AC-F5.2 engagement helper).
+/// the Service repository-key keyring.
 ///
 /// Same DPAPI-backed secret as [`local_protection_key`]; exposed as a string so
 /// the Service's `Keyring::new_with_passphrase` can consume it without
-/// `passkey-core` depending on the Service crate (DEC-LD-03).
+/// `passkey-core` depending on the Service crate.
 #[cfg(feature = "keyring")]
 pub fn local_protection_secret() -> Result<String> {
     let key = local_protection_key()?;
@@ -601,9 +601,9 @@ pub fn wrap_at_rest(plaintext: &[u8]) -> Result<Vec<u8>> {
 
 /// Open an at-rest payload, transparently passing through legacy plaintext.
 ///
-/// If `data` lacks the wrap magic it is returned unchanged (a pre-F5 plaintext
-/// file). Otherwise it is opened under the LPK, which is
-/// never minted on this path: sealed data proves an LPK existed, so a missing
+/// If `data` lacks the wrap magic it is returned unchanged (a legacy plaintext
+/// file written before at-rest sealing). Otherwise it is opened under the LPK,
+/// which is never minted on this path: sealed data proves an LPK existed, so a missing
 /// one is an [`LPK_MISSING_MARKER`] error.
 #[cfg(feature = "keyring")]
 pub fn unwrap_at_rest(data: &[u8]) -> Result<Vec<u8>> {
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn roundtrip_32_byte_seed() {
-        // The device Ed25519 seed is exactly 32 bytes — the canonical AC-F5.1 case.
+        // The device Ed25519 seed is exactly 32 bytes — the canonical key to seal.
         let seed = [0xABu8; 32];
         let wrapped = wrap_with_key(&seed, &TEST_KEY).unwrap();
         assert!(is_wrapped(&wrapped));
@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn legacy_plaintext_is_not_wrapped() {
-        // A pre-F5 plaintext value (e.g. a raw 32-byte seed) is not detected as wrapped.
+        // A legacy plaintext value (e.g. a raw 32-byte seed) is not detected as wrapped.
         let legacy = [0x11u8; 32];
         assert!(!is_wrapped(&legacy));
         // And short values never false-positive on the magic.

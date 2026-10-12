@@ -204,7 +204,7 @@ fn keystore_persists_across_recreated_instances() {
 #[cfg(feature = "keyring")]
 #[test]
 fn device_seed_sealed_at_rest_and_round_trips() {
-    // F5 / AC-F5.1: the on-disk `device.key.bin` is AES-256-GCM ciphertext
+    // The on-disk `device.key.bin` is AES-256-GCM ciphertext
     // (carries the keywrap magic), NOT the 32 raw plaintext seed bytes. This used
     // to assert only when the host's real keyring answered, because a keyring
     // failure fell back to a plaintext write; the keystore now fails closed, so
@@ -218,7 +218,7 @@ fn device_seed_sealed_at_rest_and_round_trips() {
 
     assert!(
         gitcellar_identity::keywrap::is_wrapped(&on_disk),
-        "device.key.bin must be sealed at rest (AC-F5.1), got {} bytes",
+        "device.key.bin must be sealed at rest, got {} bytes",
         on_disk.len()
     );
     assert_ne!(on_disk.len(), 32, "sealed seed must not be 32 raw bytes");
@@ -233,7 +233,7 @@ fn device_seed_sealed_at_rest_and_round_trips() {
 
 #[test]
 fn legacy_plaintext_device_seed_still_loads() {
-    // F5 backward-safety: a pre-F5 plaintext 32-byte seed (no wrap magic) must
+    // Backward-safety: a legacy plaintext 32-byte seed (no wrap magic) must
     // still load via the transparent-passthrough read path. Pure read of a
     // hand-written raw file — no global LPK state touched.
     let dir = TempDir::new().unwrap();

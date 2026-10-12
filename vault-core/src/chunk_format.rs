@@ -1,24 +1,24 @@
-//! Chunk-format version byte registry and dispatch (F6).
+//! Chunk-format version byte registry and dispatch.
 //!
 //! Every stored GitCellar chunk begins with a single format-version byte
 //! (`byte[0]`). The decrypt path reads it and dispatches to the matching
 //! unwrap routine; an unknown value is an explicit, typed error — **never** a
-//! silent fallthrough or misparse (AC-F6.3). This is the crypto-agility seam:
+//! silent fallthrough or misparse. This is the crypto-agility seam:
 //! all future on-disk format change (PQC key-wrap, keyed-CDC variants,
 //! enterprise cipher modes) routes through a new version value here, never
-//! through a user-facing cipher toggle (DEC-CH-03).
+//! through a user-facing cipher toggle.
 //!
-//! ## Version registry (AC-F6.2)
+//! ## Version registry
 //!
 //! | Byte | Meaning                                                        | Status |
 //! |------|----------------------------------------------------------------|--------|
 //! | `1`  | XChaCha20-Poly1305, AAD bound the repo *name*, no key version  | **retired** — refused |
-//! | `2`  | as `1`, marking the E1 keyed-CDC / keyed-naming pipeline       | **retired** — refused |
+//! | `2`  | as `1`, marking the keyed-CDC / keyed-naming pipeline          | **retired** — refused |
 //! | `3`  | XChaCha20-Poly1305, AAD binds the immutable `repo_uid` and the key version | **implemented** (the only one) |
-//! | `4`  | AES-256-GCM-SIV enterprise / FIPS build variant                | DEC-CH-03 — reserved |
-//! | `5`  | keyed-CDC via AES-per-byte (eprint 2025/558 provable)           | E1 AC-E1.8 — reserved |
-//! | `6`  | hybrid-wrapped session key (X25519 + ML-KEM-768, KMAC256 KDF)   | E5 (P3 dark) — reserved |
-//! | other| **explicit error** — refuse to misparse                        | AC-F6.3 |
+//! | `4`  | AES-256-GCM-SIV enterprise / FIPS build variant                | reserved |
+//! | `5`  | keyed-CDC via AES-per-byte (eprint 2025/558 provable)           | reserved |
+//! | `6`  | hybrid-wrapped session key (X25519 + ML-KEM-768, KMAC256 KDF)   | reserved |
+//! | other| **explicit error** — refuse to misparse                        | refused |
 //!
 //! ## v3 (2026-10)
 //!
@@ -46,20 +46,20 @@ use crate::error::{VaultError, VaultResult};
 /// [`parse_version`]. The constant names the byte so the registry stays readable.
 pub const V1_XCHACHA20_POLY1305: u8 = 1;
 
-/// v2 — retired (v1 plus the E1 keyed-pipeline marker). Refused by [`parse_version`].
+/// v2 — retired (v1 plus the keyed-pipeline marker). Refused by [`parse_version`].
 pub const V2_KEYED_CDC_NAMING: u8 = 2;
 
 /// v3 — XChaCha20-Poly1305 whose AAD binds `repo_uid` and the sealing key
 /// version ([`ChunkAad::canonical_aad_bytes`]). The only format emitted or read.
 pub const V3_REPO_UID_KEY_VERSION: u8 = 3;
 
-/// v4 (reserved) — AES-256-GCM-SIV enterprise / FIPS build variant (DEC-CH-03).
+/// v4 (reserved) — AES-256-GCM-SIV enterprise / FIPS build variant.
 pub const V4_AES_256_GCM_SIV: u8 = 4;
 
-/// v5 (reserved) — keyed-CDC via AES-per-byte, eprint 2025/558 provable construction (E1 AC-E1.8).
+/// v5 (reserved) — keyed-CDC via AES-per-byte, eprint 2025/558 provable construction.
 pub const V5_KEYED_CDC_AES_PER_BYTE: u8 = 5;
 
-/// v6 (reserved) — hybrid-wrapped session key (X25519 + ML-KEM-768, KMAC256 KDF) (E5, P3 dark).
+/// v6 (reserved) — hybrid-wrapped session key (X25519 + ML-KEM-768, KMAC256 KDF).
 pub const V6_HYBRID_WRAP: u8 = 6;
 
 /// A known, dispatchable chunk-format version (one variant per *implemented* format).
@@ -89,11 +89,11 @@ impl ChunkFormatVersion {
 }
 
 // ============================================================================
-// H-1 (+L-1, v3) — per-chunk identity bound into the AEAD as AAD
+// Per-chunk identity bound into the AEAD as AAD (v3)
 // ============================================================================
 
 /// Per-chunk identity, bound into the XChaCha20-Poly1305 AEAD as associated
-/// data (H-1, folding in L-1; v3 adds the repo uid and the key version).
+/// data (with the format-version byte; v3 adds the repo uid and the key version).
 ///
 /// All of a repo's chunks share one content key per key version, so without
 /// AAD any same-key blob decrypts cleanly anywhere — a malicious storage
@@ -104,7 +104,7 @@ impl ChunkFormatVersion {
 /// The cipher-level AAD is `version_byte(1) ‖ canonical_aad_bytes()` — the
 /// engine prepends its emit-version byte on encrypt and the *observed*
 /// `byte[0]` on decrypt, so a flipped format-version byte fails authentication
-/// too (the L-1 fix).
+/// too.
 ///
 /// ## No NUL in a string field (load-bearing)
 ///
@@ -115,8 +115,8 @@ impl ChunkFormatVersion {
 ///
 /// ## `stream_offset` and dedup (load-bearing)
 ///
-/// `chunk_name` is the keyed HMAC of the *plaintext* (`HMAC(id_key_repo, pt)`,
-/// AC-E1.1), and GitCellar dedups storage by that name: one stored blob is
+/// `chunk_name` is the keyed HMAC of the *plaintext* (`HMAC(id_key_repo, pt)`),
+/// and GitCellar dedups storage by that name: one stored blob is
 /// legitimately referenced at **many stream offsets** — duplicate content
 /// within one push, and (critically) unchanged chunks whose offsets shift on
 /// every incremental push (CDC insert/delete moves all later chunks). A blob
@@ -273,7 +273,7 @@ impl ChunkAad {
 /// Parse the leading format-version byte into a dispatchable version.
 ///
 /// A retired value (v1, v2), a reserved-but-unimplemented one and any unknown
-/// byte return an explicit typed error (AC-F6.3). The decrypt path must
+/// byte return an explicit typed error. The decrypt path must
 /// propagate this rather than guessing a format.
 pub fn parse_version(byte: u8) -> VaultResult<ChunkFormatVersion> {
     match byte {
@@ -285,7 +285,7 @@ pub fn parse_version(byte: u8) -> VaultResult<ChunkFormatVersion> {
         ))),
         other => Err(VaultError::Decryption(format!(
             "unknown chunk-format version byte 0x{other:02x}: not a recognized/implemented \
-             GitCellar chunk format — refusing to misparse (F6 AC-F6.3)"
+             GitCellar chunk format — refusing to misparse"
         ))),
     }
 }
@@ -295,7 +295,7 @@ pub fn parse_version(byte: u8) -> VaultResult<ChunkFormatVersion> {
 /// Errors if the chunk is empty (no version byte) or the byte is not v3.
 pub fn version_of(chunk: &[u8]) -> VaultResult<ChunkFormatVersion> {
     let first = chunk.first().ok_or_else(|| {
-        VaultError::Decryption("empty chunk: missing format-version byte (F6)".to_string())
+        VaultError::Decryption("empty chunk: missing format-version byte".to_string())
     })?;
     parse_version(*first)
 }

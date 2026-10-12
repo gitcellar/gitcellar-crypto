@@ -59,7 +59,7 @@ pub fn verify_detached_signature_with_cert(
         fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
             use openpgp::parse::stream::MessageLayer;
 
-            // CRITICAL (DISC-BC-09): Sequoia accepts the message iff `check`
+            // CRITICAL: Sequoia accepts the message iff `check`
             // returns Ok, and `verify_bytes` reflects exactly that. So we MUST
             // return Err when NO signature cryptographically verifies over the
             // data — otherwise verification succeeds even for tampered data or a
@@ -179,7 +179,7 @@ mod tests {
         }
     }
 
-    /// DISC-BC-09 regression guard. A genuine detached signature must verify
+    /// Regression guard. A genuine detached signature must verify
     /// ONLY over the exact bytes it signed: tampered data — or a signature that
     /// signs *different* bytes — must be rejected, and a signature must not
     /// verify under a different identity's public key. The pre-fix verifier
@@ -244,7 +244,7 @@ mod tests {
         assert_ne!(&data[..], &tampered[..]);
         assert!(
             !verify_detached_signature(&public_key, tampered, &signature).unwrap(),
-            "a signature over different data must be rejected (DISC-BC-09 guard)"
+            "a signature over different data must be rejected"
         );
 
         // Cross-key: a different identity's public key must not accept this

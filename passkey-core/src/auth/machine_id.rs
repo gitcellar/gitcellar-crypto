@@ -11,7 +11,7 @@
 //!
 //! This makes the machine_id verifiable against the public key.
 //!
-//! # L-3 — why the whole fingerprint (2026-07-15 pre-launch hardening)
+//! # Why the whole fingerprint
 //!
 //! This previously emitted `{prefix}-{fingerprint[..16]}` — 16 hex chars, i.e.
 //! **64 bits** of device identity. Two things follow from truncating an
@@ -49,7 +49,7 @@ use sequoia_openpgp::Cert;
 
 /// Hex widths a well-formed machine_id fingerprint may have: 40 = OpenPGP v4
 /// fingerprint, 64 = OpenPGP v6 fingerprint or a SHA-256-derived device id.
-/// (L-3: 16 — the retired 64-bit truncation — is deliberately NOT accepted.)
+/// (16 — the retired 64-bit truncation — is deliberately NOT accepted.)
 pub const MACHINE_ID_HEX_WIDTHS: [usize; 2] = [40, 64];
 
 /// Is `s` a full-width, all-hex device-identity string?
@@ -64,7 +64,7 @@ fn is_valid_fingerprint_hex(s: &str) -> bool {
 /// * `identity` - The identity to derive the machine ID from
 ///
 /// # Returns
-/// Machine ID in format `{prefix}-{full fingerprint}` (L-3 — never truncated)
+/// Machine ID in format `{prefix}-{full fingerprint}` (never truncated)
 pub fn derive_machine_id_from_identity(config: &PasskeyConfig, identity: &Identity) -> String {
     derive_machine_id_from_fingerprint(&config.machine_id_prefix, &identity.fingerprint())
 }
@@ -93,7 +93,7 @@ pub fn derive_machine_id(config: &PasskeyConfig, public_key: &str) -> Result<Str
 
 /// Derive machine ID from a fingerprint string
 ///
-/// L-3: uses the fingerprint WHOLE — no truncation. See the module docs.
+/// Uses the fingerprint WHOLE — no truncation. See the module docs.
 ///
 /// # Arguments
 /// * `prefix` - The machine ID prefix (e.g., "gcm")
@@ -122,7 +122,7 @@ pub fn verify_machine_id(
 
 /// Validate machine ID format
 ///
-/// Valid format: `{prefix}-{40 or 64 hex chars}` (L-3 — a 16-hex id is the
+/// Valid format: `{prefix}-{40 or 64 hex chars}` (a 16-hex id is the
 /// retired 64-bit truncation and is rejected).
 ///
 /// # Arguments
@@ -157,7 +157,7 @@ pub fn is_valid_machine_id_format(machine_id: &str) -> bool {
         return false;
     }
 
-    // Fingerprint part must be a full-width hex device identity (L-3).
+    // Fingerprint part must be a full-width hex device identity.
     is_valid_fingerprint_hex(parts[1])
 }
 
@@ -198,11 +198,11 @@ mod tests {
         let machine_id = derive_machine_id_from_identity(&config, &identity);
 
         assert!(machine_id.starts_with("tst-"));
-        // L-3: the WHOLE fingerprint, not a 16-hex truncation.
+        // The WHOLE fingerprint, not a 16-hex truncation.
         assert!(is_valid_machine_id(&config, &machine_id), "got {machine_id}");
     }
 
-    /// L-3 — the derived id contains the entire fingerprint, so nothing about
+    /// The derived id contains the entire fingerprint, so nothing about
     /// the key's name is discarded.
     #[test]
     fn derive_keeps_the_whole_fingerprint() {
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(extract_fingerprint(&machine_id), Some(fingerprint.as_str()));
     }
 
-    /// L-3 NEGATIVE — the truncation-collision case. Two DIFFERENT fingerprints
+    /// NEGATIVE — the truncation-collision case. Two DIFFERENT fingerprints
     /// that share their first 16 hex chars collided into one identity under the
     /// retired derivation; under the full-width derivation they are distinct,
     /// and the retired 16-hex form is no longer accepted at all.
@@ -256,7 +256,7 @@ mod tests {
         // Wrong prefix
         assert!(!is_valid_machine_id(&config, &format!("xxx-{FULL_40}")));
 
-        // L-3: retired 64-bit width and other wrong lengths
+        // Retired 64-bit width and other wrong lengths
         assert!(!is_valid_machine_id(&config, "tst-a1b2c3d4e5f60a8b")); // 16
         assert!(!is_valid_machine_id(&config, &format!("tst-{}", "a".repeat(39))));
         assert!(!is_valid_machine_id(&config, &format!("tst-{}", "a".repeat(41))));
@@ -281,7 +281,7 @@ mod tests {
         assert!(!is_valid_machine_id_format(&format!("a-{FULL_40}"))); // Prefix too short
         assert!(!is_valid_machine_id_format(&format!("toolong-{FULL_40}"))); // Prefix too long
         assert!(!is_valid_machine_id_format("gcm-short")); // Fingerprint too short
-        assert!(!is_valid_machine_id_format("gcm-a1b2c3d4e5f60a8b")); // L-3: retired 16-hex
+        assert!(!is_valid_machine_id_format("gcm-a1b2c3d4e5f60a8b")); // Retired 16-hex
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
         // Different ID should not verify
         assert!(!verify_machine_id(&config, &public_key, &format!("tst-{FULL_40}")).unwrap());
 
-        // L-3: presenting only the old 16-hex PREFIX of this very key's id must
+        // Presenting only the old 16-hex PREFIX of this very key's id must
         // not verify — a truncated claim is not this device.
         let truncated = format!("tst-{}", &extract_fingerprint(&machine_id).unwrap()[..16]);
         assert!(!verify_machine_id(&config, &public_key, &truncated).unwrap());

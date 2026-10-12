@@ -3,7 +3,7 @@
 //!
 //! Pre-feature GitCellar identities are stored as Sequoia OpenPGP
 //! certs whose primary key is Ed25519 (curve `Ed25519`, algorithm
-//! `EdDSA`). For DEC-MDR-04 Option D — single-key dual-role migration —
+//! `EdDSA`). For the single-key dual-role migration —
 //! we need the raw 32-byte Ed25519 seed back so the same keypair can
 //! play both master and device roles in the new hierarchy without
 //! requiring the user to re-enter the recovery phrase.
@@ -133,7 +133,7 @@ pub fn extract_ed25519_keypair(
 /// primary key (public material only — works on public-only certs).
 ///
 /// This is the verifier-side counterpart of [`extract_ed25519_keypair`]:
-/// under DEC-MDR-04 Option D the legacy PGP primary key IS the master/device
+/// under the single-key dual-role migration the legacy PGP primary key IS the master/device
 /// key, so a server holding only the registered armored public key can bind
 /// a migration `DeviceCertificate`'s `device_pubkey` to the key that owns the
 /// registration (Cloud API `/api/desktop/register` migration cloud-sync leg,

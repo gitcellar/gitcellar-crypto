@@ -49,7 +49,7 @@ pub mod key_directory;
 #[cfg(feature = "key-directory")]
 pub use key_directory::*;
 
-// Multi-Device Recovery (ADR-019) — hierarchical device identity.
+// Multi-Device Recovery — hierarchical device identity.
 // These modules are independent of the Sequoia OpenPGP encryption stack
 // above and use raw Ed25519 over canonical CBOR for device-cert and
 // revocation-cert transport. See the Multi-Device Recovery specification.
@@ -58,7 +58,7 @@ pub mod device_cert;
 pub mod revocation_cert;
 pub mod keystore;
 pub mod legacy_extract;
-// Key trust (KTR-5, DEC-KT-03): the phrase-derived master signs the statement that
+// Key trust: the phrase-derived master signs the statement that
 // lets an account replace its identity key.
 pub mod identity_succession;
 
@@ -82,10 +82,10 @@ pub use gitcellar_identity::{
     config_dir, users_dir, user_dir,
 };
 
-// L-3: the ONE machine-id derivation/validation pair (gitcellar-identity →
+// The ONE machine-id derivation/validation pair (gitcellar-identity →
 // passkey-core, `gcm` prefix, FULL fingerprint). Re-exported so consumers that
-// only depend on gitcellar-crypto (the Service) delegate here instead of
-// hand-rolling a copy — a second copy of a device-identity rule is exactly how
+// reach identity through gitcellar-crypto (the Service's machine-id module)
+// delegate here instead of hand-rolling a copy — a second copy of a device-identity rule is exactly how
 // the Service drifted to a 64-bit truncation while every other tier widened,
 // and the Cloud then rejected every machine_id it claimed.
 pub use gitcellar_identity::{is_valid_gcm_machine_id, machine_id as derive_machine_id};
@@ -97,12 +97,13 @@ pub use gitcellar_identity::{
     verify_detached_signature, ChallengePurpose,
 };
 
-// At-rest key wrap (F5 / DEC-LD-03) — re-exported so every consumer (desktop,
+// At-rest key wrap — re-exported so every consumer (desktop,
 // cli, test-helper, migration) opens sealed key files through one entry point.
 pub use gitcellar_identity::keywrap;
 
 /// Open an at-rest-sealed OpenPGP secret key (`secret.pgp`), transparently
-/// passing through a legacy (pre-F5) plaintext certificate (F5 / AC-F5.4).
+/// passing through a legacy plaintext certificate (written before at-rest
+/// sealing).
 ///
 /// Every raw reader of `secret.pgp` that parses the certificate (the MDR
 /// migration, the grant-decrypt CLI, etc.) must funnel the file bytes through
@@ -201,14 +202,14 @@ pub use gitcellar_identity::multi_user::{
 // Local exports
 pub use encryption::EncryptionEngine;
 pub use encryption::object_key_prefix_hex;
-// H-1: per-chunk identity bound into the AEAD — consumers construct this for
+// Per-chunk identity bound into the AEAD — consumers construct this for
 // every chunk seal/open (re-exported from vault-core).
 pub use vault_core::chunk_format::ChunkAad;
 pub use transfer::IdentityBundle;
 pub use cloud_backup::{CloudBackupBundle, EncryptedPayload, PasskeyPayload};
 pub use error::{CryptoError, Result};
 
-// Multi-Device Recovery re-exports (ADR-019). Downstream consumers (Cloud API, Desktop
+// Multi-Device Recovery re-exports. Downstream consumers (Cloud API, Desktop
 // migration and onboarding, Authorized Devices UI) import canonical types from these.
 pub use master::{MasterKeyDerivation, MasterKeyError, MaterializedMaster};
 pub use device_cert::{

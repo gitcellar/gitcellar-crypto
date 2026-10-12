@@ -1,9 +1,9 @@
-//! Master key derivation and materialization for Multi-Device Recovery (ADR-019).
+//! Master key derivation and materialization for Multi-Device Recovery.
 //!
 //! The master keypair is the root of the device-certificate chain of trust.
 //! It is **deterministically derived** from the user's 24-word BIP39 recovery
-//! phrase via a domain-separated HKDF-SHA256 expansion (per MDR-001) and is
-//! **never persisted** on any device (per DEC-MDR-08). The master private key
+//! phrase via a domain-separated HKDF-SHA256 expansion and is
+//! **never persisted** on any device. The master private key
 //! is materialized in memory only at:
 //!
 //! 1. First-onboarding ceremony (signs the user's first device certificate), or
@@ -143,8 +143,8 @@ impl MaterializedMaster {
     /// Construct a [`MaterializedMaster`] from raw 32 bytes of Ed25519
     /// secret-key material, bypassing phrase derivation.
     ///
-    /// This is the migration path for DEC-MDR-04 Option D (single-key
-    /// dual-role): existing onboarded users hold an Ed25519 keypair that
+    /// This is the single-key dual-role migration path (the legacy primary
+    /// key becomes the master/device key): existing onboarded users hold an Ed25519 keypair that
     /// today serves as their identity. After multi-device-recovery ships,
     /// that same keypair plays both master and device roles. The migration
     /// extracts the raw 32-byte secret from the legacy Sequoia OpenPGP
@@ -160,7 +160,7 @@ impl MaterializedMaster {
     /// and the caller's buffer is zeroized. Callers therefore need no cleanup of
     /// their own, and must not keep a separate copy.
     ///
-    /// F-6 (hardening review, Aug 2026): this used to take the array **by value** and
+    /// This used to take the array **by value** and
     /// do `Zeroizing::new(secret_bytes)`. `[u8; 32]` is `Copy`, so that moved a
     /// *copy* into the carrier and zeroized only the copy — the parameter and the
     /// caller's original were both left live. Three copies of the Ed25519 master
@@ -331,7 +331,7 @@ mod tests {
         // The migration path (`from_secret_bytes`) and the canonical
         // bootstrap (`from_phrase`) MUST agree on the public key for the
         // same underlying 32-byte secret. This pins the contract that
-        // DEC-MDR-04 Option D depends on: a migrated user's master pubkey
+        // the single-key dual-role migration depends on: a migrated user's master pubkey
         // is determined solely by the existing keypair's secret bytes,
         // not by which constructor produced the `MaterializedMaster`.
         let from_phrase = MaterializedMaster::from_phrase(TEST_PHRASE).unwrap();
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn from_secret_bytes_wipes_the_callers_buffer() {
-        // F-6 (hardening review, Aug 2026). The constructor used to take the seed by
+        // The constructor used to take the seed by
         // value and zeroize a `Copy` of it (`[u8; 32]` is `Copy`), so the real
         // seed survived in the caller's buffer — the module's stated premise
         // ("the backing buffer is overwritten with zeros") was only partly
@@ -372,7 +372,7 @@ mod tests {
 
         assert_eq!(
             secret, [0u8; 32],
-            "F-6: the caller's seed buffer must be zeroized in place, not copied and abandoned"
+            "the caller's seed buffer must be zeroized in place, not copied and abandoned"
         );
 
         // The master must still be usable — a wipe that also broke the key would

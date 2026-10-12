@@ -21,9 +21,9 @@ use tracing::{debug, info};
 use hkdf::Hkdf;
 use vault_core::chunk_format::{ChunkAad, ChunkFormatVersion};
 use vault_core::chunking::{Chunk, ChunkKeying};
-// vault-core's single chunk engine (F2). Chunk seal/open goes through the
-// engine's inherent AAD-bound methods (`encrypt_with_aad`/`decrypt_with_aad`,
-// H-1), so the vault-core trait itself is no longer imported here.
+// vault-core's single chunk engine. Chunk seal/open goes through the
+// engine's inherent AAD-bound methods (`encrypt_with_aad`/`decrypt_with_aad`),
+// so the vault-core trait itself is no longer imported here.
 use vault_core::encryption::XChaChaChunkEngine;
 use zeroize::Zeroizing;
 
@@ -240,8 +240,8 @@ impl EncryptionEngine {
             }
 
             fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
-                // F4 / R-2: this is the key-grant decryption path (NOT chunks —
-                // chunk integrity is now the XChaCha20-Poly1305 tag, F2). Key
+                // This is the key-grant decryption path (NOT chunks — chunk
+                // integrity is now the XChaCha20-Poly1305 tag). Key
                 // grants are encrypt-only: confidentiality comes from the SEIPD
                 // packet's own integrity protection, and there is no enclosed
                 // signature to verify. So we do NOT return a blanket `Ok(())`
@@ -287,17 +287,17 @@ impl EncryptionEngine {
     }
 
     // ========================================================================
-    // Chunk encryption — XChaCha20-Poly1305 AEAD (F2, crypto-hardening P1)
+    // Chunk encryption — XChaCha20-Poly1305 AEAD
     //
     // Chunks are NO LONGER OpenPGP. The chunk data path is a single
     // XChaCha20-Poly1305 AEAD per chunk (vault-core `XChaChaChunkEngine`),
     // emitting the versioned `[ver][24B nonce][ct][16B tag]` chunk-format-v3
-    // layout — no SEIPD packet, no ASCII armor (F3). OpenPGP (above) is retained
+    // layout — no SEIPD packet, no ASCII armor. OpenPGP (above) is retained
     // ONLY for identity/signing/key-wrap (`encrypt_data`/`decrypt_data`/
     // `sign_data`), never for chunk content.
     // ========================================================================
 
-    /// HKDF `info` for the per-repo root `K_repo` (I-2). Versioned: `v2` is the
+    /// HKDF `info` for the per-repo root `K_repo`. Versioned: `v2` is the
     /// HKDF construction; `v1` was the retired bare `SHA-256(tag ‖ scalar)`.
     /// Bumping this re-derives every repo content key and makes all previously
     /// written chunks/packs undecryptable — only ever change it together with a
@@ -310,7 +310,7 @@ impl EncryptionEngine {
     /// info = "gitcellar/krepo/v2", 32)`, where the scalar is taken from this
     /// identity's X25519 (Cv25519 ECDH) encryption subkey secret material.
     ///
-    /// ## I-2 — why HKDF, and why v2 (2026-07-15 pre-launch hardening)
+    /// ## Why HKDF, and why v2
     ///
     /// v1 was `SHA-256("gitcellar/k-repo/v1" ‖ scalar)` — a bare
     /// hash-of-concatenation. That is the classic **length-extension shape**:
@@ -321,8 +321,8 @@ impl EncryptionEngine {
     /// no attacker-controlled data follows it in the preimage) — i.e. the
     /// construction was load-bearing on its context rather than on itself. A
     /// bare hash is also not a KDF: it makes no PRF claim about its output, so
-    /// every downstream `HKDF(K_repo, …)` sub-key (E1 naming/boundary keys, the
-    /// F2 content key) inherited that weaker footing.
+    /// every downstream `HKDF(K_repo, …)` sub-key (the chunk naming/boundary
+    /// keys, the chunk content key) inherited that weaker footing.
     ///
     /// HKDF-SHA256 is HMAC-based (RFC 5869): the extract step keys HMAC with
     /// the salt and the scalar as IKM, so the length-extension shape is gone by
@@ -334,7 +334,8 @@ impl EncryptionEngine {
     ///
     /// **This is a BREAKING at-rest change, by design.** v2 derives a different
     /// `K_repo` from the same cert, so every chunk/pack written under v1 is
-    /// undecryptable — exactly like H-1/H-2. Done pre-launch (no real users) to
+    /// undecryptable — like earlier breaking chunk-format changes. Done pre-launch
+    /// (no real users) to
     /// avoid a migration later. The `info` string carries the version: bumping
     /// it is the only supported way to change this derivation, and doing so
     /// requires a coordinated dev-data reset.
@@ -351,11 +352,11 @@ impl EncryptionEngine {
     ///
     /// The content key the chunk cipher actually uses is one further HKDF-SHA256
     /// step on top of this (`gitcellar/chunk-content/v1`), done inside
-    /// `XChaChaChunkEngine` (AC-F2.2).
+    /// `XChaChaChunkEngine`.
     fn derive_k_repo(&self) -> Result<Zeroizing<[u8; 32]>> {
         let cert = self.identity.cert();
 
-        // P2-8: K_repo is derived from the secret scalar
+        // K_repo is derived from the secret scalar
         // of *the* transport-encryption subkey. If a cert carries MORE THAN ONE
         // transport-encryption subkey, `.next()` would silently pick whichever the
         // key iterator yields first — an order-dependent choice that can diverge
@@ -364,7 +365,7 @@ impl EncryptionEngine {
         // generated with exactly one transport-encryption subkey, so a cert with
         // two is malformed/adversarial: refuse to derive rather than guess.
         //
-        // F-8 (hardening review, Aug 2026): the filter carries `.alive()` +
+        // The filter carries `.alive()` +
         // `.revoked(false)` so it matches `encrypt_data` (`:104-112`) exactly.
         // Without them the guard counted REVOKED and EXPIRED subkeys as
         // ambiguity, which turned any legitimate encryption-subkey rotation
@@ -410,7 +411,7 @@ impl EncryptionEngine {
             None => Err(CryptoError::NoEncryptionKey),
         }?;
 
-        // I-2: HKDF-SHA256 over the scalar as IKM. `salt = None` (RFC 5869's
+        // HKDF-SHA256 over the scalar as IKM. `salt = None` (RFC 5869's
         // all-zero salt) matches `derive_e1_key`; the versioned `info` string is
         // what separates this domain. NOT a bare `SHA-256(tag ‖ scalar)` — see
         // the fn docs for why that shape is gone.
@@ -430,35 +431,35 @@ impl EncryptionEngine {
     }
 
     // ========================================================================
-    // E1 — keyed chunk naming + keyed CDC (crypto-hardening P2)
+    // Keyed chunk naming + keyed CDC
     //
     // Two further HKDF-SHA256 outputs from the same per-repo root `K_repo`,
-    // domain-separated from the F2 content key by distinct versioned `info`
-    // strings (AC-E1.5). They are independent (Borg's "independent keys per
+    // domain-separated from the chunk content key by distinct versioned `info`
+    // strings. They are independent (Borg's "independent keys per
     // purpose" rule): the provider receives none of them.
-    //   id_key_repo       = HKDF(K_repo, "gitcellar/chunk-name/v1",   32)  → HMAC names (AC-E1.1)
-    //   boundary_key_repo = HKDF(K_repo, "gitcellar/cdc-boundary/v1", 32)  → keyed Gear table (AC-E1.2)
-    // Every chunk is F6 version byte v3, whose AAD binds the repository's
+    //   id_key_repo       = HKDF(K_repo, "gitcellar/chunk-name/v1",   32)  → HMAC names
+    //   boundary_key_repo = HKDF(K_repo, "gitcellar/cdc-boundary/v1", 32)  → keyed Gear table
+    // Every chunk carries chunk-format version byte v3, whose AAD binds the repository's
     // immutable `repo_uid` and the sealing key version; the v2 keyed-pipeline
     // marker is retired.
     // ========================================================================
 
-    /// HKDF `info` for `id_key_repo` (keyed chunk naming; AC-E1.1/E1.5).
+    /// HKDF `info` for `id_key_repo` (keyed chunk naming).
     pub const E1_ID_KEY_INFO: &'static [u8] = b"gitcellar/chunk-name/v1";
 
-    /// HKDF `info` for `boundary_key_repo` (keyed FastCDC Gear table; AC-E1.2/E1.5).
+    /// HKDF `info` for `boundary_key_repo` (keyed FastCDC Gear table).
     pub const E1_BOUNDARY_KEY_INFO: &'static [u8] = b"gitcellar/cdc-boundary/v1";
 
-    /// HKDF `info` for `id_key_repo_prefix` (P1-4b storage-key opaquing).
+    /// HKDF `info` for `id_key_repo_prefix` (storage-key opaquing).
     ///
-    /// Domain-separated from the F2 content key and the E1 naming/CDC keys by
+    /// Domain-separated from the chunk content key and the naming/CDC keys by
     /// this distinct versioned string, so the same `K_repo` root yields an
     /// independent sub-key for the object-key prefix (Borg's "independent keys
     /// per purpose"). The provider/storage backend never receives it.
     pub const OBJECT_KEY_PREFIX_INFO: &'static [u8] = b"gitcellar/object-key-prefix/v1";
 
     /// Derive the **opaque storage object-key prefix segment** for the
-    /// repository `repo_uid` (P1-4b). Replaces the plaintext `{owner}/{name}`
+    /// repository `repo_uid`. Replaces the plaintext `{owner}/{name}`
     /// path segment so a bucket `LIST` cannot enumerate repo identity.
     ///
     /// `prefix = hex(HMAC-SHA256(id_key_repo_prefix, repo_uid))`, where
@@ -484,20 +485,20 @@ impl EncryptionEngine {
         Ok(object_key_prefix_hex(&id_key, repo_uid))
     }
 
-    /// `HKDF-SHA256(K_repo, info, 32)` — one E1 sub-key. No salt; domain
-    /// separation is carried by the versioned `info` string, matching the F2
-    /// content-key derivation.
+    /// `HKDF-SHA256(K_repo, info, 32)` — one keyed-pipeline sub-key. No salt;
+    /// domain separation is carried by the versioned `info` string, matching the
+    /// chunk content-key derivation.
     fn derive_e1_key(k_repo: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
         let hk = Hkdf::<Sha256>::new(None, k_repo);
         let mut okm = Zeroizing::new([0u8; 32]);
         hk.expand(info, &mut *okm)
-            .map_err(|e| CryptoError::Encryption(format!("E1 HKDF-SHA256 expand failed: {}", e)))?;
+            .map_err(|e| CryptoError::Encryption(format!("sub-key HKDF-SHA256 expand failed: {}", e)))?;
         Ok(okm)
     }
 
     /// Build this repo's [`ChunkKeying`] — the keyed Gear table
     /// (`boundary_key_repo`) + HMAC naming key (`id_key_repo`) the keyed
-    /// `StreamChunker` uses for E1 boundaries and chunk names (AC-E1.1/E1.2).
+    /// `StreamChunker` uses for keyed boundaries and chunk names.
     ///
     /// Deterministic per identity/cert and shared by every key-holder, exactly
     /// like [`derive_k_repo`](Self::derive_k_repo), so per-repo dedup and decrypt
@@ -509,13 +510,13 @@ impl EncryptionEngine {
         Ok(ChunkKeying::derive(&boundary_key, &id_key))
     }
 
-    /// The E1 chunk AEAD engine. Since chunk-format v3 there is one chunk
+    /// The keyed-pipeline chunk AEAD engine. Since chunk-format v3 there is one chunk
     /// format, so this is [`chunk_engine`](Self::chunk_engine) pinned to v3.
     fn chunk_engine_e1(&self) -> Result<XChaChaChunkEngine> {
         let k_repo = self.derive_k_repo()?;
         XChaChaChunkEngine::new(&*k_repo)
             .and_then(|e| e.with_format_version(ChunkFormatVersion::RepoUidKeyVersionV3))
-            .map_err(|e| CryptoError::Encryption(format!("E1 chunk cipher init failed: {}", e)))
+            .map_err(|e| CryptoError::Encryption(format!("keyed-pipeline chunk cipher init failed: {}", e)))
     }
 
     /// Build the identity AAD for a content chunk of the repository `repo_uid`
@@ -527,7 +528,7 @@ impl EncryptionEngine {
             .map_err(|e| CryptoError::Encryption(format!("chunk AAD refused: {e}")))
     }
 
-    /// Encrypt an E1 chunk (XChaCha20-Poly1305, chunk-format v3), binding the
+    /// Encrypt a keyed-pipeline chunk (XChaCha20-Poly1305, chunk-format v3), binding the
     /// chunk's identity (`aad`) into the AEAD tag. The chunk's name is the
     /// keyed HMAC produced upstream by the keyed `StreamChunker`; this step
     /// encrypts content and authenticates identity. Decryptable by
@@ -536,10 +537,10 @@ impl EncryptionEngine {
         let engine = self.chunk_engine_e1()?;
         engine
             .encrypt_with_aad(&chunk.data, aad)
-            .map_err(|e| CryptoError::Encryption(format!("E1 chunk encryption failed: {}", e)))
+            .map_err(|e| CryptoError::Encryption(format!("keyed-pipeline chunk encryption failed: {}", e)))
     }
 
-    /// Encrypt many E1 chunks of the repository `repo_uid` in parallel
+    /// Encrypt many keyed-pipeline chunks of the repository `repo_uid` in parallel
     /// (XChaCha20-Poly1305, chunk-format v3), each identity-bound via its own
     /// [`ChunkAad`] under this engine's key version ([`Self::with_key_version`];
     /// an engine without one is refused).
@@ -548,7 +549,7 @@ impl EncryptionEngine {
         repo_uid: &str,
         chunks: &[Chunk],
     ) -> Result<Vec<Vec<u8>>> {
-        info!("Encrypting {} E1 chunks in parallel", chunks.len());
+        info!("Encrypting {} keyed-pipeline chunks in parallel", chunks.len());
         let key_version = self.batch_key_version()?;
         let engine = Arc::new(self.chunk_engine_e1()?);
 
@@ -567,14 +568,14 @@ impl EncryptionEngine {
             let encrypted = task
                 .await
                 .map_err(|e| CryptoError::Encryption(format!("Task failed: {}", e)))?
-                .map_err(|e| CryptoError::Encryption(format!("E1 chunk encryption failed: {}", e)))?;
+                .map_err(|e| CryptoError::Encryption(format!("keyed-pipeline chunk encryption failed: {}", e)))?;
             encrypted_chunks.push(encrypted);
         }
         Ok(encrypted_chunks)
     }
 
     /// Encrypt a chunk with XChaCha20-Poly1305 (chunk-format v3), binding the
-    /// chunk's identity (`aad`) into the AEAD tag (H-1).
+    /// chunk's identity (`aad`) into the AEAD tag.
     pub fn encrypt_chunk(&self, chunk: &Chunk, aad: &ChunkAad) -> Result<Vec<u8>> {
         debug!(
             "Encrypting chunk: {} ({} bytes)",
@@ -588,9 +589,9 @@ impl EncryptionEngine {
     }
 
     /// Decrypt chunk data, authenticating it against the manifest-derived
-    /// identity `aad` (H-1). The XChaCha20-Poly1305 tag is the integrity check:
+    /// identity `aad`. The XChaCha20-Poly1305 tag is the integrity check:
     /// a tampered, wrong-key, or identity-mismatched (spliced / wrong-repo /
-    /// version-flipped) chunk yields an authentication error (F4/H-1/L-1).
+    /// version-flipped) chunk yields an authentication error.
     pub fn decrypt_chunk(&self, encrypted_data: &[u8], aad: &ChunkAad) -> Result<Vec<u8>> {
         let engine = self.chunk_engine()?;
         engine
@@ -637,7 +638,7 @@ impl EncryptionEngine {
     }
 
     /// Decrypt multiple chunks in parallel, authenticating each against its
-    /// manifest-derived identity (H-1). `aads` pairs positionally with
+    /// manifest-derived identity. `aads` pairs positionally with
     /// `encrypted_chunks`.
     pub async fn decrypt_chunks_parallel(
         &self,
@@ -715,7 +716,7 @@ impl EncryptionEngine {
 
         // Find THE signing-capable key.
         //
-        // F-7 (hardening review, Aug 2026): this used a bare `.next()` with no
+        // This used to take a bare `.next()` with no
         // `.alive()` / `.revoked(false)`, which meant (a) a revoked or expired
         // signing subkey holding secret material was still eligible — this side
         // would happily emit signatures that every verifier rejects under
@@ -725,7 +726,7 @@ impl EncryptionEngine {
         // iterator yielded first, an order-dependent choice no signal reports.
         // `sign_data` is the signing chokepoint for every signed protocol
         // in this crate (grants, audit entries, key assertions, bindings),
-        // so it now gets the same treatment `derive_k_repo` already had (P2-8):
+        // so it now gets the same treatment `derive_k_repo` already had:
         // filter to live+unrevoked, then REFUSE ambiguity rather than guess.
         // GitCellar certs carry exactly one signing subkey (`passkey-core`
         // `CertBuilder::new().add_signing_subkey()`; the primary is
@@ -783,7 +784,7 @@ impl EncryptionEngine {
 }
 
 /// `hex(HMAC-SHA256(prefix_key, repo_id))` — the opaque storage object-key
-/// segment (P1-4b). Free function (not a method) so the Service's storage layer,
+/// segment. Free function (not a method) so the Service's storage layer,
 /// its test prefix providers, and the e2e `object-key-prefix` CLI helper all
 /// compute byte-identical prefixes from the same `id_key_repo_prefix`.
 pub fn object_key_prefix_hex(prefix_key: &[u8; 32], repo_id: &str) -> String {
@@ -804,7 +805,7 @@ mod tests {
     }
 
     // ========================================================================
-    // I-2 — K_repo is HKDF-SHA256, not a bare SHA-256(tag ‖ scalar)
+    // K_repo is HKDF-SHA256, not a bare SHA-256(tag ‖ scalar)
     // ========================================================================
 
     /// The RETIRED v1 derivation, reproduced here (and ONLY here) so the tests
@@ -859,7 +860,7 @@ mod tests {
     }
 
     /// The v1→v2 flip actually changes the key. (If this ever fails, the
-    /// "breaking, reset dev data" premise of I-2 is false.)
+    /// "breaking, reset dev data" premise of the v2 derivation is false.)
     #[test]
     fn v2_k_repo_differs_from_retired_v1_derivation() {
         let engine = EncryptionEngine::new(create_test_identity()).unwrap();
@@ -904,7 +905,7 @@ mod tests {
 
     /// OLD-KEY REJECTION (the breaking-change proof): a chunk sealed under the
     /// retired v1 root does NOT open under the live v2 engine, and vice-versa.
-    /// This is exactly the at-rest break I-2 accepts by design — dev data must
+    /// This is exactly the at-rest break the v2 derivation accepts by design — dev data must
     /// be reset, and a stale pack must fail loudly rather than silently.
     #[test]
     fn chunks_sealed_under_v1_key_do_not_open_under_v2() {
@@ -914,7 +915,7 @@ mod tests {
 
         let chunk = Chunk {
             hash: "v1-legacy-chunk".to_string(),
-            data: b"content written before the I-2 derivation change".to_vec(),
+            data: b"content written before the K_repo derivation change".to_vec(),
             size: 47,
             offset: 0,
         };
@@ -938,7 +939,7 @@ mod tests {
         assert_eq!(engine.decrypt_chunk(&sealed_v2, &aad).unwrap(), chunk.data);
     }
 
-    /// Test repo id + the H-1 identity AAD for a test chunk.
+    /// Test repo id + the identity AAD for a test chunk.
     const TEST_REPO_ID: &str = "test/repo";
 
     fn aad_for(chunk: &Chunk) -> ChunkAad {
@@ -976,12 +977,12 @@ mod tests {
         let decrypted = engine.decrypt_chunk(&encrypted, &aad).unwrap();
         assert_eq!(decrypted, chunks[0].data);
 
-        // H-1: the same bytes under a different claimed identity fail closed.
+        // The same bytes under a different claimed identity fail closed.
         let wrong = ChunkAad::for_content_chunk(TEST_REPO_ID, "other-name", chunks[0].size as u64);
         assert!(engine.decrypt_chunk(&encrypted, &wrong).is_err());
     }
 
-    /// F2 (AC-F2.1/F2.5/F2.6) — a written chunk is the raw XChaCha20-Poly1305
+    /// A written chunk is the raw XChaCha20-Poly1305
     /// v3 format, NOT an OpenPGP packet and NOT ASCII armor. This is the live
     /// integration proof that the chunk write path no longer emits SEIPD/OpenPGP.
     #[test]
@@ -995,14 +996,14 @@ mod tests {
         };
         let out = engine.encrypt_chunk(&chunk, &aad_for(&chunk)).unwrap();
 
-        // byte[0] is the F6 version byte (== 3), not an OpenPGP packet tag.
+        // byte[0] is the chunk-format version byte (== 3), not an OpenPGP packet tag.
         // OpenPGP binary packet headers always have the high bit set (>= 0x80);
         // ASCII-armored output starts with '-' (0x2d). v3 == 0x03 is neither, so
-        // `gpg --list-packets` cannot parse a stored chunk (AC-F2.6).
+        // `gpg --list-packets` cannot parse a stored chunk.
         assert_eq!(out[0], 3, "leading byte must be chunk-format version 3");
         assert!(out[0] < 0x80, "must not look like an OpenPGP packet tag");
         assert_ne!(out[0], b'-', "must not be ASCII armor");
-        // Size == plaintext + 41 (1 ver + 24 nonce + 16 tag), not plaintext×1.33 (F3).
+        // Size == plaintext + 41 (1 ver + 24 nonce + 16 tag), not plaintext×1.33.
         assert_eq!(out.len(), chunk.data.len() + 41);
         // No OpenPGP armor banner anywhere in the bytes.
         assert!(!out.windows(5).any(|w| w == b"-----"));
@@ -1011,8 +1012,8 @@ mod tests {
         assert_eq!(engine.decrypt_chunk(&out, &aad_for(&chunk)).unwrap(), chunk.data);
     }
 
-    /// F2 (AC-F2.3) — per-byte tamper rejection on the live path: the AEAD tag
-    /// is the real integrity check (F4), not theater.
+    /// Per-byte tamper rejection on the live path: the AEAD tag
+    /// is the real integrity check, not theater.
     #[test]
     fn live_chunk_tamper_is_rejected() {
         let engine = EncryptionEngine::new(create_test_identity()).unwrap();
@@ -1033,7 +1034,7 @@ mod tests {
             );
         }
 
-        // L-1: a targeted flip to a retired version byte (v3→v1, v3→v2) must
+        // A targeted flip to a retired version byte (v3→v1, v3→v2) must
         // also be rejected.
         for retired in [1u8, 2] {
             let mut flipped = good.clone();
@@ -1041,12 +1042,12 @@ mod tests {
             flipped[0] = retired;
             assert!(
                 engine.decrypt_chunk(&flipped, &aad).is_err(),
-                "v3→v{retired} version flip was not rejected (L-1)"
+                "v3→v{retired} version flip was not rejected"
             );
         }
     }
 
-    /// F2 — a different identity (different per-repo key) cannot decrypt: the
+    /// A different identity (different per-repo key) cannot decrypt: the
     /// content key derives from the X25519 secret scalar, which the provider /
     /// other repos never hold.
     #[test]
@@ -1068,13 +1069,14 @@ mod tests {
     }
 
     // ========================================================================
-    // E1 — keyed naming + keyed CDC derivation (AC-E1.1/E1.2/E1.5/E1.6)
+    // Keyed naming + keyed CDC derivation
     // ========================================================================
 
-    /// AC-E1.5 — `id_key_repo`/`boundary_key_repo` are domain-separated HKDF
+    /// `id_key_repo`/`boundary_key_repo` are domain-separated HKDF
     /// outputs of `K_repo`: deterministic per identity, shared by every
     /// key-holder (same cert ⇒ same keying), and the keyed name is NOT the public
-    /// SHA-256 (the provider cannot compute it). AC-E1.1 dedup + oracle-closed.
+    /// SHA-256 (the provider cannot compute it): dedup holds, and the name gives
+    /// an observer no hash to test guessed content against.
     #[test]
     fn e1_keying_is_domain_separated_and_key_scoped() {
         let a = EncryptionEngine::new(create_test_identity()).unwrap();
@@ -1112,7 +1114,7 @@ mod tests {
         let engine = EncryptionEngine::new(create_test_identity()).unwrap();
         let chunk = Chunk {
             hash: "deadbeef".to_string(),
-            data: b"E1 keyed pipeline content".to_vec(),
+            data: b"v3 keyed pipeline content".to_vec(),
             size: 25,
             offset: 0,
         };
@@ -1124,11 +1126,11 @@ mod tests {
         assert_eq!(e1[0], 3);
         assert_eq!(engine.decrypt_chunk(&plain, &aad).unwrap(), chunk.data);
         assert_eq!(engine.decrypt_chunk(&e1, &aad).unwrap(), chunk.data);
-        // The 41-byte F2 overhead (no extra bytes in the chunk).
+        // The 41-byte AEAD chunk overhead (no extra bytes in the chunk).
         assert_eq!(e1.len(), chunk.data.len() + 41);
     }
 
-    /// End-to-end E1: keyed `StreamChunker` (HMAC names + keyed boundaries) →
+    /// End-to-end keyed pipeline: keyed `StreamChunker` (HMAC names + keyed boundaries) →
     /// `encrypt_chunks_e1_parallel` (v3) → `decrypt_chunks_parallel` →
     /// reassembles to the original bytes, all under this identity's keying.
     #[tokio::test]
@@ -1156,7 +1158,7 @@ mod tests {
             .encrypt_chunks_e1_parallel(TEST_REPO_ID, &chunks)
             .await
             .unwrap();
-        assert!(encrypted.iter().all(|c| c[0] == 3), "all E1 chunks are v3");
+        assert!(encrypted.iter().all(|c| c[0] == 3), "all keyed-pipeline chunks are v3");
 
         let aads: Vec<ChunkAad> = chunks.iter().map(aad_for).collect();
         let decrypted = engine.decrypt_chunks_parallel(&encrypted, &aads).await.unwrap();
@@ -1164,7 +1166,7 @@ mod tests {
         assert_eq!(reassembled, data);
     }
 
-    /// P2-8 — a cert with TWO transport-encryption
+    /// A cert with TWO transport-encryption
     /// subkeys must be REFUSED by the content-key derivation, because picking
     /// "the first" is order-dependent and would diverge `K_repo` between parties
     /// (→ undecryptable chunks). Pre-fix `derive_k_repo` used `.next()` and
@@ -1194,7 +1196,7 @@ mod tests {
         let res = engine.encrypt_chunk(&chunk, &aad_for(&chunk));
         assert!(
             res.is_err(),
-            "P2-8: a cert with 2 transport-encryption subkeys must be refused (K_repo would diverge)"
+            "a cert with 2 transport-encryption subkeys must be refused (K_repo would diverge)"
         );
         assert!(
             format!("{:#}", res.unwrap_err()).contains("transport-encryption subkeys"),
@@ -1210,13 +1212,13 @@ mod tests {
     }
 
     // ========================================================================
-    // F-7 / F-8 (hardening review, Aug 2026) — key selection must agree with
+    // Key selection must agree with
     // `encrypt_data`: live + unrevoked only, and refuse ambiguity.
     // ========================================================================
 
     /// Revoke one subkey of `cert` (hard revocation by the primary key) and
     /// return the updated cert. Used to build the "rotated away" certs the
-    /// F-7/F-8 filters must handle.
+    /// signing- and encryption-key filters must handle.
     fn revoke_subkey_at(cert: openpgp::Cert, subkey_index: usize) -> openpgp::Cert {
         use openpgp::cert::prelude::*;
         use openpgp::types::ReasonForRevocation;
@@ -1249,7 +1251,7 @@ mod tests {
         cert.insert_packets(sig).expect("revocation inserts").0
     }
 
-    /// F-8 — the `K_repo` ambiguity guard must count only LIVE, UNREVOKED
+    /// The `K_repo` ambiguity guard must count only LIVE, UNREVOKED
     /// transport-encryption subkeys. Pre-fix the filter omitted
     /// `.alive().revoked(false)`, so a cert that had legitimately rotated its
     /// encryption subkey (add new, revoke old) counted 2 and `derive_k_repo`
@@ -1284,14 +1286,14 @@ mod tests {
 
         let sealed = engine
             .encrypt_chunk(&chunk, &aad_for(&chunk))
-            .expect("F-8: a revoked encryption subkey must not count as ambiguity");
+            .expect("a revoked encryption subkey must not count as ambiguity");
         let opened = engine
             .decrypt_chunk(&sealed, &aad_for(&chunk))
             .expect("round-trip under the surviving live subkey");
         assert_eq!(opened, chunk.data);
     }
 
-    /// F-7 — `sign_data` must not sign with a REVOKED signing subkey. Pre-fix it
+    /// `sign_data` must not sign with a REVOKED signing subkey. Pre-fix it
     /// took `.next()` off an unfiltered iterator, so it emitted signatures no
     /// verifier accepts (Sequoia's `StandardPolicy` rejects a revoked signer) —
     /// a self-DoS that surfaces simultaneously across every signed protocol.
@@ -1315,7 +1317,7 @@ mod tests {
         let res = engine.sign_data(b"authorize this");
         assert!(
             res.is_err(),
-            "F-7: signing with a revoked signing subkey must be refused, not silently produce \
+            "signing with a revoked signing subkey must be refused, not silently produce \
              a signature every verifier rejects"
         );
 
@@ -1324,10 +1326,10 @@ mod tests {
         assert!(ok_engine.sign_data(b"authorize this").is_ok());
     }
 
-    /// F-7 — a cert with two LIVE signing subkeys is ambiguous: `.next()` would
+    /// A cert with two LIVE signing subkeys is ambiguous: `.next()` would
     /// pick whichever the iterator yields first, so a rotation would silently
     /// change which key signs with no signal to anyone. Refuse, the same way
-    /// `derive_k_repo` already refuses (P2-8).
+    /// `derive_k_repo` already refuses.
     #[test]
     fn f7_two_live_signing_subkeys_are_refused() {
         use openpgp::cert::prelude::*;
@@ -1343,7 +1345,7 @@ mod tests {
 
         let engine = EncryptionEngine::from_cert(cert).unwrap();
         let res = engine.sign_data(b"authorize this");
-        assert!(res.is_err(), "F-7: two signing subkeys must be refused, not guessed");
+        assert!(res.is_err(), "two signing subkeys must be refused, not guessed");
         assert!(
             format!("{:#}", res.unwrap_err()).contains("signing subkeys"),
             "error must name the ambiguous-subkey condition"
@@ -1351,10 +1353,10 @@ mod tests {
     }
 
     // ========================================================================
-    // P1-4b — opaque storage object-key prefix derivation
+    // Opaque storage object-key prefix derivation
     // ========================================================================
 
-    /// P1-4b — `derive_object_key_prefix` is deterministic per cert, shared by
+    /// `derive_object_key_prefix` is deterministic per cert, shared by
     /// every key-holder of that cert (collaborator-agreement), differs per
     /// `repo_id` and per identity, and never embeds the plaintext repo identity
     /// (non-reversibility of the leak). This is the unit-level proof behind the
@@ -1392,7 +1394,7 @@ mod tests {
         assert!(p1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
-    /// P1-4b — the free `object_key_prefix_hex` is a pure HMAC-SHA256 that the
+    /// The free `object_key_prefix_hex` is a pure HMAC-SHA256 that the
     /// e2e CLI helper and storage layer share. Locks the exact construction so a
     /// drift between the Service and the harness is caught at unit-test time.
     #[test]

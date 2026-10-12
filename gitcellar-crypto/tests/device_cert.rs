@@ -1,8 +1,8 @@
-//! Integration tests for `gitcellar-crypto::device_cert` (Contract C-1).
+//! Integration tests for `gitcellar-crypto::device_cert`.
 //!
 //! Pinned at the public API: `DeviceCertificate::sign_with_master`,
 //! `sign_with_device`, `verify`, `to_cbor` / `from_cbor`, plus the
-//! cross-signing accept/reject contract from MDR-035 + DEC-MDR-06/07.
+//! cross-signing accept/reject contract.
 
 use ed25519_dalek::SigningKey;
 use gitcellar_crypto::device_cert::{
@@ -313,7 +313,7 @@ fn unsupported_version_rejected() {
 
 // --------------------------------------------------------------------
 // Property tests for the cross-signing contract — the heart of the
-// Probandurgy testability scaffolding for this module.
+// testability scaffolding for this module.
 // --------------------------------------------------------------------
 
 mod property_tests {
@@ -418,9 +418,9 @@ mod property_tests {
     }
 }
 
-// ─── Option-D dual-role signing (DEC-MDR-04) ─────────────────────────────────
+// ─── Single-key dual-role signing ────────────────────────────────────────────
 //
-// Under Option D the migration reuses the legacy secret.pgp keypair as BOTH
+// The single-key dual-role migration reuses the legacy secret.pgp keypair as BOTH
 // master and device, so master_pubkey == device_pubkey. Because onboarding
 // writes secret.pgp and never mints a native device cert, EVERY onboarded user
 // is in this posture — so these two tests cover the real, universal path, not
@@ -434,7 +434,7 @@ mod property_tests {
 
 #[test]
 fn option_d_dual_role_authorize_signs_as_master() {
-    // The Option-D posture: one key is both master and device.
+    // The dual-role posture: one key is both master and device.
     let legacy = SigningKey::from_bytes(&[7u8; 32]);
     let dual_role_pubkey = legacy.verifying_key().to_bytes();
     let new_device_pubkey = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
@@ -445,7 +445,7 @@ fn option_d_dual_role_authorize_signs_as_master() {
     assert_eq!(
         master.public_key(),
         dual_role_pubkey,
-        "Option D: the materialized master IS the legacy keypair"
+        "single-key dual-role: the materialized master IS the legacy keypair"
     );
 
     // What `device_authorize` must do when master == device.
@@ -465,7 +465,7 @@ fn option_d_dual_role_authorize_signs_as_master() {
     // must still pass via the Master branch.
     let eligible = vec![dual_role_pubkey];
     cert.verify(&dual_role_pubkey, &eligible)
-        .expect("Option-D master-signed cert must verify");
+        .expect("single-key dual-role master-signed cert must verify");
 }
 
 #[test]

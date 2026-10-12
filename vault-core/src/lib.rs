@@ -40,7 +40,7 @@
 //! let chunks = chunker.chunk_data(&data)?;
 //!
 //! // 2. Seal each chunk (XChaCha20-Poly1305, chunk format v3). Its identity is
-//! //    bound into the AEAD as associated data (H-1), so a stored blob cannot be
+//! //    bound into the AEAD as associated data, so a stored blob cannot be
 //! //    spliced or substituted under another identity or key version.
 //! let encryptor = XChaChaChunkEngine::new(&k_repo)?;
 //! let storage = FileStorage::new("/tmp/vault-storage")?;
@@ -57,7 +57,7 @@
 //!
 //! ## Features
 //!
-//! - `gpg`: retained no-op (the GPG-per-chunk engine was retired, R-1; vault-core
+//! - `gpg`: retained no-op (the GPG-per-chunk engine was retired; vault-core
 //!   no longer contains OpenPGP code)
 //! - `aes-only`: no-op, retained for compatibility (the AES passphrase/FFI helper is always built)
 //! - `ffi`: Enable C-compatible FFI exports for cross-language use
@@ -68,9 +68,9 @@
 //! ┌─────────────────────────────────────────────────────────┐
 //! │                      vault-core                         │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  chunk_format │  Version-byte registry + dispatch (F6)  │
+//! │  chunk_format │  Version-byte registry + dispatch       │
 //! │  chunking     │  Content-defined chunking (CDC)         │
-//! │  encryption   │  XChaCha20-Poly1305 chunk AEAD (F2)     │
+//! │  encryption   │  XChaCha20-Poly1305 chunk AEAD          │
 //! │  storage      │  S3-compatible storage backends         │
 //! │  ffi          │  C-compatible exports (optional)        │
 //! └─────────────────────────────────────────────────────────┘

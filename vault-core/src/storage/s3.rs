@@ -49,7 +49,7 @@ pub struct S3Config {
     /// Optional path prefix within the bucket
     pub prefix: Option<String>,
 
-    /// Ceiling on the size of a single downloaded object, in bytes (F-2).
+    /// Ceiling on the size of a single downloaded object, in bytes.
     ///
     /// The storage provider is the adversary in the zero-access model: it can
     /// answer any GET with arbitrary bytes. `download` therefore refuses an
@@ -320,7 +320,7 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // Bounded. An unbounded `text()` on an error path defeats the
             // per-object ceiling in the SAME call — a hostile provider answers 500
             // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
             // is only ever logged or wrapped in an error.
@@ -366,7 +366,7 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // Bounded. An unbounded `text()` on an error path defeats the
             // per-object ceiling in the SAME call — a hostile provider answers 500
             // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
             // is only ever logged or wrapped in an error.
@@ -381,7 +381,7 @@ impl StorageBackend for S3Storage {
             )));
         }
 
-        // F-2 (hardening review, Aug 2026): bound the body BEFORE buffering it.
+        // Bound the body BEFORE buffering it.
         //
         // This used to be a bare `response.bytes().await` — no size check, no
         // streaming, no ceiling. The provider is the adversary here and controls
@@ -399,7 +399,7 @@ impl StorageBackend for S3Storage {
         //      what covers a response that declares nothing (chunked transfer
         //      encoding) or declares a lie.
         //
-        // M-9: both guards now live in `bounded_http::read_body_bounded`, shared
+        // Both guards now live in `bounded_http::read_body_bounded`, shared
         // with every other provider-facing backend, which is the point. The
         // ceiling was first written here, on a backend with no production
         // consumer, while the backends actually in production stayed
@@ -472,7 +472,7 @@ impl StorageBackend for S3Storage {
 
         if !response.status().is_success() {
             let status = response.status();
-            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // Bounded. An unbounded `text()` on an error path defeats the
             // per-object ceiling in the SAME call — a hostile provider answers 500
             // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
             // is only ever logged or wrapped in an error.
@@ -487,7 +487,7 @@ impl StorageBackend for S3Storage {
             )));
         }
 
-        // M-9: the list response is a success-path read and was also unbounded.
+        // The list response is a success-path read and was also unbounded.
         // A hostile provider can answer a LIST with an arbitrarily large XML
         // document, and the regex scan below runs over whatever we buffered. Same
         // per-object ceiling as a download — a listing is not more trustworthy
@@ -537,7 +537,7 @@ impl StorageBackend for S3Storage {
         // S3 returns 204 for successful delete, but also doesn't error on non-existent
         if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
             let status = response.status();
-            // M-9: bounded. An unbounded `text()` on an error path defeats the
+            // Bounded. An unbounded `text()` on an error path defeats the
             // per-object ceiling in the SAME call — a hostile provider answers 500
             // with a 50 GB body instead of 200. Diagnostic-sized ceiling: this text
             // is only ever logged or wrapped in an error.
@@ -626,7 +626,7 @@ mod tests {
     }
 
     // ====================================================================
-    // F-2 (hardening review, Aug 2026) — a malicious provider must not be able
+    // A malicious provider must not be able
     // to OOM the client with an oversized response body.
     //
     // These drive a real `S3Storage` against a throwaway loopback server
@@ -680,7 +680,7 @@ mod tests {
         let err = storage
             .download("repos/opaque/packs/deadbeef")
             .await
-            .expect_err("F-2: a 5 MiB declared body under a 1 KiB ceiling must be refused");
+            .expect_err("a 5 MiB declared body under a 1 KiB ceiling must be refused");
 
         let msg = err.to_string();
         assert!(
@@ -715,7 +715,7 @@ mod tests {
         let err = storage
             .download("repos/opaque/packs/deadbeef")
             .await
-            .expect_err("F-2: an undeclared body over the ceiling must be aborted");
+            .expect_err("an undeclared body over the ceiling must be aborted");
 
         assert!(
             err.to_string().contains("ceiling"),

@@ -56,8 +56,8 @@ pub const INCIDENT_MANIFEST_VERSION: u32 = 2;
 /// signature lifted into a manifest.
 pub const INCIDENT_MANIFEST_DOMAIN: &str = "gitcellar/incident-manifest/v2";
 
-/// Phase-1 `action_url` host allowlist (broadcast interface contract §3 / BC-SEC-03,
-/// DEC-BC-07). Exact host match, `https` only. Enforced on author-side (compose
+/// Phase-1 `action_url` host allowlist (broadcast interface contract §3).
+/// Exact host match, `https` only. Enforced on author-side (compose
 /// rejects) AND verifier-side (Desktop refuses to linkify a non-allowlisted
 /// host even with a valid signature).
 pub const ACTION_URL_ALLOWLIST: &[&str] = &[
@@ -67,9 +67,9 @@ pub const ACTION_URL_ALLOWLIST: &[&str] = &[
     "api.gitcellar.com",
 ];
 
-/// Severity tier (broadcast interface contract §4 / BC-MODEL-02, DEC-BC-02).
+/// Severity tier (broadcast interface contract §4).
 ///
-/// "Mandatory" is a tier property, never a user setting (DEC-BC-01). Phase 1
+/// "Mandatory" is a tier property, never a user setting. Phase 1
 /// ships the full enum; Phase-1 *delivery* focuses on `Incident` (Warning rides
 /// the same rails; Announcement delivery is Phase 2 but the value exists now).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ impl BroadcastTier {
 }
 
 /// Optional targeting filters (broadcast interface contract §1). Evaluated by the
-/// Cloud API's WHERE-clause builder (BC-TARGET-*), NOT by the shared verifier —
+/// Cloud API's WHERE-clause builder, NOT by the shared verifier —
 /// the Desktop receives only broadcasts it was targeted for. Omitted entirely
 /// for broadcast-to-all (break-glass always omits).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -117,7 +117,7 @@ impl BroadcastTargeting {
     }
 }
 
-/// The signed unit (broadcast interface contract §1 / BC-MODEL-01).
+/// The signed unit (broadcast interface contract §1).
 ///
 /// **Field declaration order IS the canonical serialization order** — do not
 /// reorder. Optional fields use `skip_serializing_if` so an absent field is
@@ -141,7 +141,7 @@ pub struct BroadcastPayload {
     /// Issue time (RFC3339 UTC).
     pub issued_at: DateTime<Utc>,
     /// Optional publisher-set expiry (RFC3339 UTC). Bounds the live window of a
-    /// captured manifest (DEC-BC-11).
+    /// captured manifest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
     /// Monotonic per-publisher sequence (Phase-1 convention: unix-epoch-seconds
@@ -218,8 +218,8 @@ pub fn action_url_allowed(url: &str) -> bool {
 }
 
 /// Manifest state (broadcast interface contract §2). `Clear` is a signed overwrite —
-/// the published manifest is never deleted (deletion ambiguity is the trap DEC-BC-11
-/// closes).
+/// the published manifest is never deleted (a deletion would be ambiguous,
+/// so a signed overwrite stands in for it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestState {
@@ -238,8 +238,8 @@ impl ManifestState {
     }
 }
 
-/// The off-infra `incident.json` object (broadcast interface contract §2 / C-05,
-/// DEC-BC-11). Always present, always signed — over the envelope, so `state`
+/// The off-infra `incident.json` object (broadcast interface contract §2).
+/// Always present, always signed — over the envelope, so `state`
 /// is authenticated (see [`IncidentManifest::signed_bytes`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncidentManifest {
@@ -280,7 +280,7 @@ pub enum ManifestVerdict {
     /// to extend a long incident).
     Expired { seq: i64 },
     /// Absence / parse-fail / unknown version / signature-fail / field
-    /// mismatch — "no trusted signal" (DEC-BC-11). NEVER an implied all-clear;
+    /// mismatch — "no trusted signal". NEVER an implied all-clear;
     /// the caller holds its last verified state and never escalates on this.
     NoTrustedSignal { reason: String },
 }
@@ -595,8 +595,7 @@ mod tests {
     #[test]
     fn bad_signature_is_no_trusted_signal_never_renders() {
         // Empty trust set + a payload string -> signature can never verify ->
-        // NoTrustedSignal. Confirms an unsigned/forged manifest never renders
-        // (BC-SEC-01).
+        // NoTrustedSignal. Confirms an unsigned/forged manifest never renders.
         let p = sample_payload(100);
         let pstr = p.to_canonical_json().unwrap();
         let m = IncidentManifest {
@@ -623,7 +622,7 @@ mod tests {
 
     // Regression guard for the every-payload-passes bug: a real detached
     // signature must verify over the EXACT signed bytes and FAIL over tampered
-    // bytes. This is the BC-SEC-01 load-bearing test — if `check()` returns Ok
+    // bytes. This is the load-bearing forged-manifest test — if `check()` returns Ok
     // unconditionally, the tampered assertion below flips to a security hole.
     #[test]
     fn real_signature_verifies_only_over_exact_bytes() {

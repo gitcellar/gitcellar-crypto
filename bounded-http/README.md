@@ -73,7 +73,7 @@ is the point.
 
 ## Decision Log
 
-**Why this is a crate and not a module.** A hardening review (Aug 2026) found
+**Why this is a crate and not a module.** In August 2026 we found
 that the per-object download ceiling had been added to `vault-core`'s S3
 backend — a backend with no production consumer at the time — while the
 backends actually in production stayed unbounded. The guard existed and
